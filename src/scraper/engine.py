@@ -66,6 +66,7 @@ async def run_scraper() -> RunStats:
         titles = json.loads(config.titles_json) if config else []
         locations = json.loads(config.locations_json) if config else []
         keywords = json.loads(config.keywords_json) if config else []
+        levels = json.loads(config.levels_json) if config else []
 
         if not titles:
             logger.info("No search titles configured — skipping scraper run")
@@ -77,7 +78,7 @@ async def run_scraper() -> RunStats:
         stats.sources_checked += 1
 
         # Layer 2: Career pages (targeted)
-        career_jobs = await career_pages.scrape_all(titles, locations)
+        career_jobs = await career_pages.scrape_all(titles, locations, levels)
         stats.sources_checked += len(career_pages.GREENHOUSE_COMPANIES) + len(career_pages.LEVER_COMPANIES)
 
         all_jobs = brave_jobs + career_jobs
