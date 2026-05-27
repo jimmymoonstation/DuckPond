@@ -20,8 +20,11 @@
 body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; }
 
 /* Header */
-header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 24px; }
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 24px; }
 .header-inner { display: flex; align-items: center; justify-content: space-between; max-width: 1400px; margin: 0 auto; }
+.header-inner > div { display: flex; flex-direction: column; justify-content: center; }
+.mascot { height: 56px; width: auto; margin-right: 12px; image-rendering: auto; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4)); transition: transform 0.2s; cursor: default; }
+.mascot:hover { transform: rotate(-8deg) scale(1.1); }
 header h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
 #countdown { font-size: 13px; color: var(--text-dim); }
 #countdown strong { color: var(--yellow); }

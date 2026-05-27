@@ -1,11 +1,23 @@
 {
   "manifest_version": 3,
   "name": "Job Hunt Partner",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Analyze any job posting instantly — fit score, talking points, cover letter bullets.",
   "permissions": ["activeTab", "storage", "scripting"],
+  "icons": {
+    "16":  "icon16.png",
+    "32":  "icon32.png",
+    "48":  "icon48.png",
+    "128": "icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Analyze this job"
+    "default_title": "Analyze this job",
+    "default_icon": {
+      "16":  "icon16.png",
+      "32":  "icon32.png",
+      "48":  "icon48.png",
+      "128": "icon128.png"
+    }
   }
 }
