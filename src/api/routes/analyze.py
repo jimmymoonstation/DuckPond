@@ -141,9 +141,8 @@ def _call_claude(job_text: str, resume_text: str, url: str) -> AnalyzeResult:
 
     try:
         result = subprocess.run(
-            [CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
+            ["runuser", "-u", "claudebot", "--", CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=60,
-            env={"HOME": "/home/claudebot", "PATH": "/usr/bin:/bin"},
         )
         raw = result.stdout.strip()
 
