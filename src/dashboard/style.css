@@ -198,6 +198,45 @@ a:hover { text-decoration: underline; }
 /* ── Pagination ── */
 #jobs-pagination { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
 
+/* ── Resume modal ── */
+#resume-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px; padding: 28px; width: 440px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+#resume-modal h3 { margin-bottom: 16px; font-size: 16px; font-weight: 600; }
+#resume-modal label {
+  display: block; margin: 12px 0 5px;
+  font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+}
+#resume-modal input {
+  width: 100%; background: var(--surface2);
+  border: 1px solid var(--border); color: var(--text);
+  padding: 8px 12px; border-radius: var(--radius); font-size: 13px; outline: none;
+}
+#resume-modal input:focus { border-color: var(--accent); }
+#rm-error { font-size: 12px; color: var(--red); margin-top: 6px; min-height: 16px; }
+
+.file-drop {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 20px; text-align: center;
+  cursor: pointer; color: var(--text-dim); font-size: 13px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.file-drop:hover, .file-drop.drag-over {
+  border-color: var(--accent); background: var(--surface2); color: var(--text);
+}
+.file-drop.file-selected { border-color: var(--accent); color: var(--accent); }
+
+.file-download-link {
+  font-size: 12px; color: var(--accent);
+  text-decoration: none; white-space: nowrap;
+}
+.file-download-link:hover { text-decoration: underline; }
+
 /* ── Sortable column headers ── */
 th.sortable {
   cursor: pointer;

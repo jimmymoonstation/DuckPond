@@ -45,7 +45,7 @@ function setupTabs() {
   document.getElementById('search-loc').addEventListener('input', debounce(() => loadJobs(), 400));
   document.getElementById('filter-status').addEventListener('change', loadApplications);
   document.getElementById('btn-save-config').addEventListener('click', saveConfig);
-  document.getElementById('btn-add-resume').addEventListener('click', promptAddResume);
+  setupResumeModal();
   document.getElementById('modal-cancel').addEventListener('click', closeModal);
   document.getElementById('modal-confirm').addEventListener('click', confirmApply);
   document.getElementById('status-modal-cancel').addEventListener('click', closeStatusModal);
@@ -223,8 +223,10 @@ async function openApplyModal(jobId) {
   pendingJobId = jobId;
   const resumes = await apiFetch('/resumes');
   const sel = document.getElementById('modal-resume');
-  sel.innerHTML = '<option value="">No resume selected</option>' +
-    (resumes?.resumes || []).map(r => `<option value="${r.id}">${esc(r.name)} ${r.version ? `v${r.version}` : ''}</option>`).join('');
+  sel.innerHTML = '<option value="">— No resume —</option>' +
+    (resumes?.resumes || []).map(r =>
+      `<option value="${r.id}">${esc(r.name)}${r.version ? ` v${r.version}` : ''}${r.file_path ? ' 📄' : ''}</option>`
+    ).join('');
   document.getElementById('modal-notes').value = '';
   document.getElementById('modal-overlay').classList.remove('hidden');
 }
@@ -342,39 +344,119 @@ async function saveConfig() {
 
 async function loadResumes() {
   const tbody = document.getElementById('resumes-body');
-  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
   const data = await apiFetch('/resumes');
   if (!data?.resumes.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="loading">No resumes yet. Add your first one.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">No resumes yet. Upload your first one.</td></tr>';
     return;
   }
-  tbody.innerHTML = data.resumes.map(r => `
+  tbody.innerHTML = data.resumes.map(r => {
+    const hasFile = !!r.file_path;
+    const fileCell = hasFile
+      ? `<a href="${API}/resumes/${r.id}/file" target="_blank" class="file-download-link" title="Download ${esc(r.name)}">⬇ Download</a>`
+      : `<span style="color:var(--text-dim)">—</span>`;
+    return `
     <tr>
-      <td>${esc(r.name)}</td>
-      <td>${r.version ?? '—'}</td>
+      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${r.version ? `<span class="source-chip">v${esc(r.version)}</span>` : '—'}</td>
       <td>${(r.tags || []).map(t => `<span class="source-chip">${esc(t)}</span>`).join(' ')}</td>
+      <td>${fileCell}</td>
       <td style="font-size:12px;color:var(--text-dim)">${formatDate(r.created_at)}</td>
       <td>
         <button class="btn-secondary btn-sm" onclick="deleteResume(${r.id})">Delete</button>
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
-function promptAddResume() {
-  const name = prompt('Resume name (e.g. "SWE Backend v3"):');
-  if (!name) return;
-  const version = prompt('Version (optional, e.g. "3.0"):') || null;
-  const tagsRaw = prompt('Tags (comma-separated, e.g. backend,python,senior):') || '';
-  const tags = tagsRaw.split(',').map(s => s.trim()).filter(Boolean);
-  apiFetch('/resumes', {
-    method: 'POST',
-    body: JSON.stringify({ name, version, tags, content_json: {} }),
-  }).then(() => loadResumes());
+// ── Add Resume Modal ──────────────────────────────────────────────────────────
+
+let _rmFile = null;
+
+function openResumeModal() {
+  _rmFile = null;
+  ['rm-name','rm-version','rm-tags'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('rm-drop-label').textContent = 'Drop file here or click to browse';
+  document.getElementById('rm-error').textContent = '';
+  document.getElementById('rm-confirm').disabled = false;
+  document.getElementById('rm-confirm').textContent = 'Upload & Save';
+  document.getElementById('resume-overlay').classList.remove('hidden');
+  document.getElementById('rm-name').focus();
+}
+
+function closeResumeModal() {
+  document.getElementById('resume-overlay').classList.add('hidden');
+}
+
+function setupResumeModal() {
+  document.getElementById('btn-add-resume').addEventListener('click', openResumeModal);
+  document.getElementById('rm-cancel').addEventListener('click', closeResumeModal);
+  document.getElementById('rm-confirm').addEventListener('click', submitResume);
+
+  const drop = document.getElementById('rm-drop');
+  const fileInput = document.getElementById('rm-file');
+
+  drop.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) setResumeFile(fileInput.files[0]);
+  });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag-over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) setResumeFile(e.dataTransfer.files[0]);
+  });
+}
+
+function setResumeFile(file) {
+  _rmFile = file;
+  document.getElementById('rm-drop-label').textContent = `✓ ${file.name}`;
+  document.getElementById('rm-drop').classList.add('file-selected');
+  // Auto-fill name from filename if empty
+  const nameEl = document.getElementById('rm-name');
+  if (!nameEl.value) {
+    nameEl.value = file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
+  }
+}
+
+async function submitResume() {
+  const name = document.getElementById('rm-name').value.trim();
+  const errEl = document.getElementById('rm-error');
+  if (!name) { errEl.textContent = 'Name is required.'; return; }
+  if (!_rmFile) { errEl.textContent = 'Please select a file.'; return; }
+
+  const btn = document.getElementById('rm-confirm');
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+
+  const form = new FormData();
+  form.append('file', _rmFile);
+  form.append('name', name);
+  const version = document.getElementById('rm-version').value.trim();
+  if (version) form.append('version', version);
+  form.append('tags', document.getElementById('rm-tags').value.trim());
+
+  try {
+    const resp = await fetch(`${API}/resumes/upload`, { method: 'POST', body: form });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      errEl.textContent = err.detail || `Upload failed (${resp.status})`;
+      btn.disabled = false;
+      btn.textContent = 'Upload & Save';
+      return;
+    }
+    closeResumeModal();
+    loadResumes();
+  } catch (e) {
+    errEl.textContent = 'Could not reach server.';
+    btn.disabled = false;
+    btn.textContent = 'Upload & Save';
+  }
 }
 
 async function deleteResume(id) {
-  if (!confirm('Delete this resume version?')) return;
+  if (!confirm('Delete this resume version? The file will also be removed.')) return;
   await apiFetch(`/resumes/${id}`, { method: 'DELETE' });
   loadResumes();
 }

@@ -129,17 +129,40 @@
   <!-- Resumes -->
   <section id="tab-resumes" class="tab-content">
     <div class="toolbar">
-      <button id="btn-add-resume" class="btn-primary">+ Add Resume Version</button>
+      <button id="btn-add-resume" class="btn-primary">+ Upload Resume</button>
     </div>
     <table id="resumes-table">
       <thead>
-        <tr><th>Name</th><th>Version</th><th>Tags</th><th>Created</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Version</th><th>Tags</th><th>File</th><th>Added</th><th>Actions</th></tr>
       </thead>
       <tbody id="resumes-body">
-        <tr><td colspan="5" class="loading">No resumes yet. Add your first one.</td></tr>
+        <tr><td colspan="6" class="loading">No resumes yet. Upload your first one.</td></tr>
       </tbody>
     </table>
   </section>
+
+  <!-- Add Resume Modal -->
+  <div id="resume-overlay" class="hidden">
+    <div id="resume-modal">
+      <h3>📄 Add Resume Version</h3>
+      <label>Name <span style="color:var(--red)">*</span></label>
+      <input id="rm-name" type="text" placeholder="e.g. Data Engineer — Startup Focus" />
+      <label>Version <small style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</small></label>
+      <input id="rm-version" type="text" placeholder="e.g. 2.1" />
+      <label>Tags <small style="font-weight:400;text-transform:none;letter-spacing:0">(comma-separated)</small></label>
+      <input id="rm-tags" type="text" placeholder="e.g. data-eng, python, fintech" />
+      <label>Resume File <span style="color:var(--red)">*</span> <small style="font-weight:400;text-transform:none;letter-spacing:0">PDF or DOCX</small></label>
+      <div class="file-drop" id="rm-drop">
+        <span id="rm-drop-label">Drop file here or <u>click to browse</u></span>
+        <input id="rm-file" type="file" accept=".pdf,.doc,.docx" style="display:none" />
+      </div>
+      <div class="modal-actions">
+        <button id="rm-confirm" class="btn-primary">Upload & Save</button>
+        <button id="rm-cancel" class="btn-secondary">Cancel</button>
+      </div>
+      <p id="rm-error"></p>
+    </div>
+  </div>
 
   <!-- Add Job Modal -->
   <div id="add-job-overlay" class="hidden">
