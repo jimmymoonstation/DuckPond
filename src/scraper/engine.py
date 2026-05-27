@@ -129,14 +129,14 @@ def _save_jobs(raw_jobs: list[dict]) -> tuple[int, int]:
                     description=data.get("description"),
                     posted_at=data.get("posted_at"),
                 )
-                db.add(job)
-                db.flush()  # detect constraint violation before commit
+                # Use a nested savepoint so a constraint violation on one row
+                # doesn't invalidate the entire session / previously-added rows.
+                with db.begin_nested():
+                    db.add(job)
                 new_count += 1
             except IntegrityError:
-                db.rollback()
                 dup_count += 1
             except Exception as e:
-                db.rollback()
                 logger.warning(f"Failed to save job: {e}")
 
         if new_count > 0:

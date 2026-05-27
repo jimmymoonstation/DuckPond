@@ -72,7 +72,7 @@ async function loadStats() {
 
 async function loadJobs(showLoading = true) {
   const tbody = document.getElementById('jobs-body');
-  if (showLoading) tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+  if (showLoading) tbody.innerHTML = '<tr><td colspan="8" class="loading">Loading…</td></tr>';
 
   const q = document.getElementById('search-q').value;
   const loc = document.getElementById('search-loc').value;
@@ -84,7 +84,7 @@ async function loadJobs(showLoading = true) {
   if (!data) return;
 
   if (!data.jobs.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="loading">No new openings found. Configure search or run scraper.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">No new openings found. Configure search or run scraper.</td></tr>';
     return;
   }
 
@@ -101,7 +101,8 @@ async function loadJobs(showLoading = true) {
       <td>${j.location ? esc(j.location) : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td>${j.level ? `<span class="badge badge-new">${esc(j.level)}</span>` : '—'}</td>
       <td><span class="source-chip">${esc(j.source.split(':')[0])}</span></td>
-      <td style="color:var(--text-dim);font-size:12px">${formatPostedDate(j.posted_at, j.discovered_at)}</td>
+      <td style="color:var(--text-dim);font-size:12px">${j.posted_at ? `<span title="${fmtExact(j.posted_at)}">${timeAgo(j.posted_at)}</span>` : '<span style="color:var(--border)">—</span>'}</td>
+      <td style="color:var(--text-dim);font-size:12px"><span title="${fmtExact(j.discovered_at)}">${timeAgo(j.discovered_at)}</span></td>
       <td>
         <button class="btn-primary btn-sm" onclick="openApplyModal(${j.id})">Apply</button>
         <button class="btn-secondary btn-sm" style="margin-left:4px" onclick="saveJob(${j.id})">Save</button>
@@ -222,7 +223,7 @@ async function saveJob(jobId) {
 
 async function loadApplications() {
   const tbody = document.getElementById('apps-body');
-  tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="loading">Loading…</td></tr>';
   const status = document.getElementById('filter-status').value;
   const params = new URLSearchParams({ limit: 100 });
   if (status) params.set('status', status);
@@ -403,15 +404,12 @@ function timeAgo(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function formatPostedDate(posted_at, discovered_at) {
-  const dt = posted_at || discovered_at;
-  if (!dt) return '—';
-  const label = posted_at ? 'posted' : 'found';
-  const exact = new Date(dt).toLocaleString('en-US', {
+function fmtExact(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true,
   });
-  return `<span title="${label} ${exact}">${timeAgo(dt)}</span>`;
 }
 
 function debounce(fn, delay) {
