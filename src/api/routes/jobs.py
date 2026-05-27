@@ -27,6 +27,16 @@ class JobCreate(BaseModel):
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+_SORTABLE = {
+    "job_title":    Job.job_title,
+    "company_name": Job.company_name,
+    "location":     Job.location,
+    "level":        Job.level,
+    "source":       Job.source,
+    "posted_at":    Job.posted_at,
+    "discovered_at": Job.discovered_at,
+}
+
 @router.get("", response_model=JobListOut)
 def list_jobs(
     status: Optional[str] = Query(None, description="new|saved|applied|all"),
@@ -34,6 +44,8 @@ def list_jobs(
     q: Optional[str] = None,
     location: Optional[str] = None,
     level: Optional[str] = None,
+    sort_by: Optional[str] = Query("discovered_at", description="column to sort by"),
+    sort_dir: Optional[str] = Query("desc", description="asc|desc"),
     limit: int = Query(50, le=200),
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -62,7 +74,9 @@ def list_jobs(
         query = query.filter(Job.id.in_(applied_job_ids))
 
     total = query.count()
-    jobs = query.order_by(Job.discovered_at.desc()).offset(offset).limit(limit).all()
+    col = _SORTABLE.get(sort_by, Job.discovered_at)
+    order = col.asc() if sort_dir == "asc" else col.desc()
+    jobs = query.order_by(order).offset(offset).limit(limit).all()
 
     return JobListOut(total=total, jobs=jobs)
 

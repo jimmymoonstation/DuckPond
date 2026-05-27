@@ -2,6 +2,7 @@ const API = '/api';
 let currentJobPage = 0;
 let pendingJobId = null;
 let pendingAppId = null;
+let jobSort = { by: 'discovered_at', dir: 'desc' };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -70,13 +71,48 @@ async function loadStats() {
 
 // ── Job Board ─────────────────────────────────────────────────────────────────
 
+function sortBy(col) {
+  if (jobSort.by === col) {
+    jobSort.dir = jobSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    jobSort.by = col;
+    jobSort.dir = col === 'posted_at' || col === 'discovered_at' ? 'desc' : 'asc';
+  }
+  currentJobPage = 0;
+  loadJobs();
+}
+
+function renderSortHeaders() {
+  const cols = [
+    { key: 'job_title',    label: 'Job Title' },
+    { key: 'company_name', label: 'Company' },
+    { key: 'location',     label: 'Location' },
+    { key: 'level',        label: 'Level' },
+    { key: 'source',       label: 'Source' },
+    { key: 'posted_at',    label: 'Posted' },
+    { key: 'discovered_at', label: 'Found' },
+    { key: null,           label: 'Actions' },
+  ];
+  const thead = document.querySelector('#jobs-table thead tr');
+  thead.innerHTML = cols.map(c => {
+    if (!c.key) return `<th>${c.label}</th>`;
+    const active = jobSort.by === c.key;
+    const arrow = active ? (jobSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅';
+    return `<th class="sortable${active ? ' sort-active' : ''}" onclick="sortBy('${c.key}')">${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+  }).join('');
+}
+
 async function loadJobs(showLoading = true) {
+  renderSortHeaders();
   const tbody = document.getElementById('jobs-body');
   if (showLoading) tbody.innerHTML = '<tr><td colspan="8" class="loading">Loading…</td></tr>';
 
   const q = document.getElementById('search-q').value;
   const loc = document.getElementById('search-loc').value;
-  const params = new URLSearchParams({ status: 'new', limit: 50, offset: currentJobPage * 50 });
+  const params = new URLSearchParams({
+    status: 'new', limit: 50, offset: currentJobPage * 50,
+    sort_by: jobSort.by, sort_dir: jobSort.dir,
+  });
   if (q) params.set('q', q);
   if (loc) params.set('location', loc);
 
