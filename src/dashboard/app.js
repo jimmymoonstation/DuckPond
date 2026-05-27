@@ -90,7 +90,13 @@ async function loadJobs(showLoading = true) {
 
   tbody.innerHTML = data.jobs.map(j => `
     <tr>
-      <td><a href="${j.url}" target="_blank">${esc(j.job_title)}</a></td>
+      <td>
+        ${j.original_url
+          ? `<a href="${j.original_url}" target="_blank" title="Open on company career site">${esc(j.job_title)}</a>
+             <a href="${j.url}" target="_blank" title="Open source (${esc(j.source.split(':')[0])})" style="color:var(--text-dim);font-size:10px;margin-left:4px">↗src</a>`
+          : `<a href="${j.url}" target="_blank">${esc(j.job_title)}</a>`
+        }
+      </td>
       <td>${esc(j.company_name)}</td>
       <td>${j.location ? esc(j.location) : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td>${j.level ? `<span class="badge badge-new">${esc(j.level)}</span>` : '—'}</td>

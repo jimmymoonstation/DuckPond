@@ -4,6 +4,7 @@ Greenhouse, Lever, Ashby expose clean JSON APIs.
 Workday uses a consistent POST JSON API.
 LinkedIn uses a semi-public guest search endpoint.
 """
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -87,6 +88,15 @@ WORKDAY_COMPANIES = [
 ]
 
 
+# Career domains that have dedicated scrapers — used to skip re-registering them as "custom"
+KNOWN_CAREER_DOMAINS = {
+    "careers.google.com",
+    "metacareers.com",
+    "jobs.apple.com",
+    "amazon.jobs",
+}
+
+
 # ── Level keywords for filtering ──────────────────────────────────────────────
 
 LEVEL_KEYWORDS = {
@@ -158,6 +168,22 @@ async def scrape_all(titles: list[str], locations: list[str], levels: list[str] 
         except Exception as e:
             logger.debug(f"LinkedIn: {e}")
 
+        # Google Careers (always included — major Bay Area employer)
+        try:
+            jobs = await _scrape_google(client, titles, locations, levels)
+            results.extend(jobs)
+        except Exception as e:
+            logger.debug(f"Google Careers: {e}")
+
+        # Custom career sites learned from manual adds (best-effort HTML scrape)
+        for c in db_companies:
+            if c["ats_type"] == "custom" and c.get("career_url"):
+                try:
+                    jobs = await _scrape_custom_site(client, c["company_name"], c["career_url"], titles, locations, levels)
+                    results.extend(jobs)
+                except Exception as e:
+                    logger.debug(f"Custom {c['company_name']}: {e}")
+
     logger.info(f"Career pages: found {len(results)} matching jobs")
     return results
 
@@ -174,6 +200,7 @@ def _load_db_companies() -> list[dict]:
                     "ats_type": r.ats_type,
                     "ats_slug": r.ats_slug,
                     "workday_board": r.workday_board,
+                    "career_url": r.career_url,
                 }
                 for r in rows
             ]
@@ -392,6 +419,112 @@ async def _scrape_linkedin(client, titles: list[str], locations: list[str], leve
                 "posted_at": posted_at,
             })
 
+    return results
+
+
+async def _scrape_google(client, titles: list[str], locations: list[str], levels: list[str]) -> list[dict]:
+    """Google Careers public API — no auth needed."""
+    results = []
+    seen = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    }
+    for title_kw in (titles or [""]):
+        params = {
+            "q": title_kw,
+            "location": "San Francisco Bay Area, CA, USA",
+            "jlo": "en_US",
+            "num": "20",
+        }
+        try:
+            resp = await client.get(
+                "https://careers.google.com/api/v3/search/",
+                params=params, headers=headers,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:
+            continue
+
+        for job in data.get("jobs", []):
+            job_id = job.get("id", "")
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+
+            title = job.get("title", "")
+            # locations is a list of dicts like [{"display": "San Francisco, CA, USA"}]
+            locs = job.get("locations", [])
+            loc = ", ".join(l.get("display", "") for l in locs if l.get("display"))
+            if not _matches_criteria(title, loc, titles, locations, levels):
+                continue
+
+            apply_url = job.get("apply_url") or f"https://careers.google.com/jobs/results/{job_id}"
+            posted_at = _parse_iso(job.get("publish_date"))
+            results.append({
+                "company_job_id": f"google_{job_id}",
+                "company_name": "Google",
+                "job_title": title,
+                "location": loc or None,
+                "level": _infer_level(title),
+                "url": apply_url,
+                "source": "google",
+                "description": job.get("description", "")[:2000],
+                "posted_at": posted_at,
+            })
+    return results
+
+
+async def _scrape_custom_site(client, company_name: str, career_url: str,
+                               titles: list[str], locations: list[str], levels: list[str]) -> list[dict]:
+    """
+    Best-effort scrape of a custom career site the user taught us about.
+    We do a basic fetch + look for job links/titles. Not perfect but captures obvious listings.
+    """
+    results = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        # Try common career page paths
+        for path in ["/careers", "/jobs", "/careers/open-positions", ""]:
+            try:
+                resp = await client.get(career_url + path, headers=headers, follow_redirects=True)
+                if resp.status_code == 200 and len(resp.text) > 500:
+                    break
+            except Exception:
+                continue
+        else:
+            return []
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        # Look for job links — any <a> whose text looks like a job title
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True)
+            if not text or len(text) < 5 or len(text) > 120:
+                continue
+            if not _matches_criteria(text, "", titles, [], levels):
+                continue
+            href = a["href"]
+            if not href.startswith("http"):
+                href = career_url.rstrip("/") + "/" + href.lstrip("/")
+            results.append({
+                "company_job_id": hashlib.md5(href.encode()).hexdigest()[:16],
+                "company_name": company_name,
+                "job_title": text,
+                "location": None,
+                "level": _infer_level(text),
+                "url": href,
+                "source": f"custom:{career_url}",
+                "description": None,
+                "posted_at": None,
+            })
+            if len(results) >= 20:
+                break
+    except Exception as e:
+        logger.debug(f"Custom site scrape {career_url}: {e}")
     return results
 
 

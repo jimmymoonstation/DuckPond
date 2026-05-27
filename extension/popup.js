@@ -63,10 +63,23 @@ async function extractPageContent() {
       }
 
       const fullText = mainText || clone.innerText || clone.textContent || '';
+
+      // Try to find the company's original ATS URL — links on the page that point to known ATS platforms
+      const atsPatterns = [
+        'greenhouse.io', 'lever.co', 'ashbyhq.com', 'myworkdayjobs.com',
+        'careers.google.com', 'metacareers.com', 'jobs.apple.com', 'amazon.jobs',
+        'taleo.net', 'jobvite.com', 'icims.com', 'smartrecruiters.com', 'bamboohr.com',
+      ];
+      const allLinks = [...document.querySelectorAll('a[href]')]
+        .map(a => a.href)
+        .filter(h => h && h.startsWith('http'));
+      const originalUrl = allLinks.find(h => atsPatterns.some(p => h.includes(p))) || null;
+
       return {
         text: fullText.slice(0, 8000),
         meta_title: metaTitle,
         meta_desc: metaDesc,
+        original_url: originalUrl,
       };
     },
   });
@@ -108,7 +121,7 @@ async function analyze() {
     const resp = await fetch(`${server}/api/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: currentUrl, page_content: pageData.text }),
+      body: JSON.stringify({ url: currentUrl, page_content: pageData.text, original_url: pageData.original_url || null }),
     });
 
     if (!resp.ok) {
@@ -262,6 +275,7 @@ async function saveToBoard() {
         job_title: lastAnalysis.job_title,
         company_name: lastAnalysis.company_name,
         url: currentUrl,
+        original_url: lastAnalysis.original_url || null,
         location: lastAnalysis.location || null,
         level: lastAnalysis.level || null,
         description: lastAnalysis.description || null,

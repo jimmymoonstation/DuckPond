@@ -22,7 +22,8 @@ router = APIRouter(prefix="/analyze", tags=["analyze"])
 
 class AnalyzeRequest(BaseModel):
     url: str
-    page_content: Optional[str] = None  # sent by extension; skips server-side fetch
+    page_content: Optional[str] = None   # sent by extension; skips server-side fetch
+    original_url: Optional[str] = None   # company's own ATS URL detected by extension
 
 
 class AnalyzeResult(BaseModel):
@@ -36,6 +37,7 @@ class AnalyzeResult(BaseModel):
     gaps: list[str]
     cover_letter_bullets: list[str]
     description: Optional[str]
+    original_url: Optional[str] = None   # passed through so the extension can use it on save
 
 
 @router.post("", response_model=AnalyzeResult)
@@ -54,6 +56,7 @@ async def analyze_job(body: AnalyzeRequest, db: Session = Depends(get_db)):
 
     # 3. Ask Claude to analyze
     result = _call_claude(job_text, resume_text, body.url)
+    result.original_url = body.original_url  # pass through for the extension to use on save
     return result
 
 

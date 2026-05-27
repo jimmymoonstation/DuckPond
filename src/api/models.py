@@ -16,7 +16,8 @@ class Job(Base):
     job_title = Column(String, nullable=False)
     location = Column(String)
     level = Column(String)
-    url = Column(String, nullable=False)
+    url = Column(String, nullable=False)          # source URL (e.g. LinkedIn)
+    original_url = Column(String)                 # company's own ATS/career page URL
     source = Column(String, nullable=False)
     description = Column(Text)
     posted_at = Column(DateTime)
@@ -104,9 +105,10 @@ class TrackedCompany(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     company_name = Column(String, nullable=False)
-    ats_type = Column(String, nullable=False)   # greenhouse|lever|ashby|workday
-    ats_slug = Column(String, nullable=False)    # slug used in ATS API URL
+    ats_type = Column(String, nullable=False)   # greenhouse|lever|ashby|workday|google|custom
+    ats_slug = Column(String, nullable=False)    # slug or domain key
     workday_board = Column(String)               # board path for Workday companies
+    career_url = Column(String)                  # base career site URL for custom/unknown ATS
     discovered_from = Column(String, nullable=False, default="manual")  # manual|auto
     added_at = Column(DateTime, default=func.now(), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)

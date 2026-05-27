@@ -18,6 +18,7 @@ class JobCreate(BaseModel):
     job_title: str
     company_name: str
     url: str
+    original_url: Optional[str] = None   # company's own ATS URL (e.g. from LinkedIn redirect)
     location: Optional[str] = None
     level: Optional[str] = None
     description: Optional[str] = None
@@ -87,6 +88,7 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
         location=body.location,
         level=body.level,
         url=body.url,
+        original_url=body.original_url,
         source="manual",
         description=body.description,
         posted_at=body.posted_at,
@@ -97,47 +99,78 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
 
-    # Learn the company's ATS from the URL so future scraper runs cover it
-    _maybe_register_company(db, body.company_name, body.url)
+    # Learn the company's career site from whichever URL reveals more (prefer original_url)
+    learn_url = body.original_url or body.url
+    _maybe_register_company(db, body.company_name, learn_url)
 
     return job
 
 
 def _maybe_register_company(db: Session, company_name: str, url: str):
-    """If the manually-added job URL reveals a known ATS, register the company for future scraping."""
+    """
+    Learn a company's career source from a manually-added job URL.
+    - Known ATS (Greenhouse/Lever/Ashby/Workday): register so scraper covers it next run.
+    - Unrecognized domain (Google, Meta, custom): store career_url for reference/future scrapers.
+    - Skips anything already in hardcoded lists or already tracked.
+    """
+    from urllib.parse import urlparse
     from src.api.models import TrackedCompany
-    from src.scraper.career_pages import detect_ats_from_url, GREENHOUSE_COMPANIES, LEVER_COMPANIES, ASHBY_COMPANIES, WORKDAY_COMPANIES
+    from src.scraper.career_pages import (
+        detect_ats_from_url,
+        GREENHOUSE_COMPANIES, LEVER_COMPANIES, ASHBY_COMPANIES, WORKDAY_COMPANIES,
+        KNOWN_CAREER_DOMAINS,
+    )
 
     try:
         ats = detect_ats_from_url(url)
-        if not ats:
-            return
-        slug = ats["ats_slug"]
 
-        # Check if already covered by hardcoded lists
-        already_known = (
-            (ats["ats_type"] == "greenhouse" and slug in GREENHOUSE_COMPANIES) or
-            (ats["ats_type"] == "lever" and slug in LEVER_COMPANIES) or
-            (ats["ats_type"] == "ashby" and slug in ASHBY_COMPANIES) or
-            (ats["ats_type"] == "workday" and any(slug == t[0] for t in WORKDAY_COMPANIES))
-        )
-        if already_known:
-            return
+        if ats:
+            slug = ats["ats_slug"]
+            already_known = (
+                (ats["ats_type"] == "greenhouse" and slug in GREENHOUSE_COMPANIES) or
+                (ats["ats_type"] == "lever" and slug in LEVER_COMPANIES) or
+                (ats["ats_type"] == "ashby" and slug in ASHBY_COMPANIES) or
+                (ats["ats_type"] == "workday" and any(slug == t[0] for t in WORKDAY_COMPANIES))
+            )
+            if already_known:
+                return
+            existing = db.query(TrackedCompany).filter_by(ats_type=ats["ats_type"], ats_slug=slug).first()
+            if existing:
+                return
+            db.add(TrackedCompany(
+                company_name=company_name,
+                ats_type=ats["ats_type"],
+                ats_slug=slug,
+                workday_board=ats.get("workday_board"),
+                career_url=url,
+                discovered_from="manual",
+            ))
+            db.commit()
+            logger.info(f"Learned new company: {company_name} ({ats['ats_type']}:{slug})")
 
-        # Check if already tracked in DB
-        existing = db.query(TrackedCompany).filter_by(ats_type=ats["ats_type"], ats_slug=slug).first()
-        if existing:
-            return
+        else:
+            # Unknown ATS — store the career domain so we remember where this company posts
+            parsed = urlparse(url)
+            host = parsed.netloc.lower().lstrip("www.")
+            # Skip generic job boards — we only want company-owned career sites
+            skip_hosts = {"linkedin.com", "indeed.com", "glassdoor.com", "ziprecruiter.com",
+                          "monster.com", "dice.com", "simplyhired.com", "wellfound.com"}
+            if any(s in host for s in skip_hosts):
+                return
+            career_base = f"{parsed.scheme}://{parsed.netloc}"
+            existing = db.query(TrackedCompany).filter_by(ats_type="custom", ats_slug=host).first()
+            if existing:
+                return
+            db.add(TrackedCompany(
+                company_name=company_name,
+                ats_type="custom",
+                ats_slug=host,
+                career_url=career_base,
+                discovered_from="manual",
+            ))
+            db.commit()
+            logger.info(f"Learned custom career site: {company_name} → {career_base}")
 
-        db.add(TrackedCompany(
-            company_name=company_name,
-            ats_type=ats["ats_type"],
-            ats_slug=slug,
-            workday_board=ats.get("workday_board"),
-            discovered_from="manual",
-        ))
-        db.commit()
-        logger.info(f"Learned new company: {company_name} ({ats['ats_type']}:{slug})")
     except Exception as e:
         logger.debug(f"Could not register company from URL {url}: {e}")
 

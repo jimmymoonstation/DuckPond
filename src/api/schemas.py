@@ -14,6 +14,7 @@ class JobOut(BaseModel):
     location: Optional[str]
     level: Optional[str]
     url: str
+    original_url: Optional[str]
     source: str
     description: Optional[str]
     posted_at: Optional[datetime]
