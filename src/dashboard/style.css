@@ -107,6 +107,7 @@ a:hover { text-decoration: underline; }
 
 /* Scraper status */
 #scraper-status { font-size: 12px; color: var(--text-dim); }
+#last-searched { font-size: 12px; color: var(--text-dim); margin-left: auto; }
 
 /* Pagination */
 #jobs-pagination { display: flex; gap: 8px; margin-top: 16px; align-items: center; }

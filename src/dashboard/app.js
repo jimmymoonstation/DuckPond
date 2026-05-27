@@ -10,8 +10,10 @@ document.addEventListener('DOMContentLoaded', () => {
   loadStats();
   loadJobs();
   loadConfig();
+  loadScraperStatus();
   setInterval(loadStats, 30_000);
   setInterval(() => { if (activeTab() === 'board') loadJobs(false); }, 60_000);
+  setInterval(loadScraperStatus, 60_000);
 });
 
 function activeTab() {
@@ -336,12 +338,27 @@ async function deleteResume(id) {
 
 // ── Scraper ───────────────────────────────────────────────────────────────────
 
+async function loadScraperStatus() {
+  const data = await apiFetch('/scraper/status');
+  if (!data) return;
+  const el = document.getElementById('last-searched');
+  if (data.last_run) {
+    const ago = timeAgo(data.last_run);
+    const found = data.jobs_found_last_run;
+    const runs = data.total_runs;
+    el.textContent = `Last searched ${ago}  ·  ${found} new jobs  ·  ${runs} runs`;
+    el.title = `Full timestamp: ${new Date(data.last_run + 'Z').toLocaleString()}`;
+  } else {
+    el.textContent = 'Scraper not yet run';
+  }
+}
+
 async function triggerScrape() {
   const el = document.getElementById('scraper-status');
   el.textContent = 'Running…';
   await apiFetch('/scraper/run', { method: 'POST' });
   el.textContent = 'Scraper triggered. Results in ~30s.';
-  setTimeout(() => { el.textContent = ''; loadJobs(); loadStats(); }, 35_000);
+  setTimeout(() => { el.textContent = ''; loadJobs(); loadStats(); loadScraperStatus(); }, 35_000);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
