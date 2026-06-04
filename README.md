@@ -1,4 +1,4 @@
-# Duck Hunt — Job Search Partner
+# 🦆 DuckPond — Job Search Partner
 
 An AI-powered job hunting system built for full-time job seekers on a deadline. It continuously scrapes every major ATS platform for fresh openings, tracks your application pipeline, syncs your inbox, and coaches you via Discord.
 
