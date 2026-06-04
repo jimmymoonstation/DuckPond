@@ -1,8 +1,11 @@
 import hashlib
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
+import httpx
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -96,7 +99,24 @@ def list_jobs(
     order = col.asc() if sort_dir == "asc" else col.desc()
     jobs = query.order_by(order).offset(offset).limit(limit).all()
 
-    return JobListOut(total=total, jobs=jobs)
+    # Build applied (company_lower, title_lower) set for fast lookup
+    applied_pairs = {
+        (co.lower().strip(), ttl.lower().strip())
+        for co, ttl in db.query(Job.company_name, Job.job_title)
+            .join(Application, Application.job_id == Job.id)
+            .all()
+    }
+
+    job_outs = []
+    for j in jobs:
+        out = JobOut.model_validate(j)
+        out.already_applied = (
+            j.company_name.lower().strip(),
+            j.job_title.lower().strip()
+        ) in applied_pairs
+        job_outs.append(out)
+
+    return JobListOut(total=total, jobs=job_outs)
 
 
 class FeedbackBody(BaseModel):
@@ -238,6 +258,177 @@ def _maybe_register_company(db: Session, company_name: str, url: str):
 
     except Exception as e:
         logger.debug(f"Could not register company from URL {url}: {e}")
+
+
+@router.post("/{job_id}/fetch-description")
+async def fetch_description(job_id: int, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    url = job.original_url or job.url
+    description = await _fetch_job_description(url)
+
+    if not description:
+        raise HTTPException(422, f"Could not extract description from {url}")
+
+    job.description = description
+    db.commit()
+    return {"description": description}
+
+
+async def _fetch_job_description(url: str) -> Optional[str]:
+    # LinkedIn: extract job ID (may be bare digits or at end of a slug like "title-at-company-1234567890")
+    li_match = re.search(r"linkedin\.com/jobs/view/(?:[^/?#]*?-)?(\d{7,})(?:[/?#]|$)", url)
+    if li_match:
+        return await _fetch_linkedin_description(li_match.group(1))
+
+    # Apple Jobs: client-side rendered — use their JSON API
+    apple_match = re.search(r"jobs\.apple\.com/.*?/details/([\w-]+)", url)
+    if apple_match:
+        return await _fetch_apple_description(apple_match.group(1))
+
+    # Direct ATS / career page
+    return await _fetch_generic_description(url)
+
+
+async def _fetch_linkedin_description(job_id: str) -> Optional[str]:
+    guest_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(guest_url, headers=headers)
+            if resp.status_code != 200:
+                return None
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # Use lambda to match classes with double-hyphens (CSS selector quirks)
+            def _has_class(tag, *names):
+                classes = tag.get("class", [])
+                return any(n in classes for n in names)
+
+            block = (
+                soup.find(lambda t: t.name == "div" and _has_class(t, "description__text--rich")) or
+                soup.find(lambda t: t.name == "div" and _has_class(t, "show-more-less-html__markup")) or
+                soup.find(lambda t: t.name == "div" and _has_class(t, "description__text")) or
+                soup.find(attrs={"data-testid": "job-description"})
+            )
+            if block:
+                text = block.get_text(separator="\n", strip=True)
+                text = re.sub(r"^Description\s*\n?", "", text, flags=re.I)
+                if len(text) > 150:
+                    return _clean_description(text)
+            return None
+    except Exception as e:
+        logger.warning(f"LinkedIn guest fetch failed for job {job_id}: {e}")
+        return None
+
+
+async def _fetch_apple_description(job_number: str) -> Optional[str]:
+    """Apple jobs are JS-rendered; fall back to None so the UI shows the paste box."""
+    return None
+
+
+_JS_REQUIRED_PHRASES = [
+    "please enable javascript", "enable javascript", "javascript is required",
+    "javascript must be enabled", "you need javascript",
+]
+
+# Lines to strip out of any fetched description
+_BOILERPLATE_PATTERNS = re.compile(
+    r"^(sign in|join now|join or sign in|new to linkedin|privacy policy|cookie policy|"
+    r"user agreement|forgot password|email or phone|by clicking continue|report this job|"
+    r"save job|tailor my resume|am i a good fit|get ai.powered|sign in to access|"
+    r"sign in to evaluate|over \d+ applicants|see who .+ hired|apply now|easy apply|"
+    r"show more|show less|password|back|continue|skip|next|dismiss)$",
+    re.I,
+)
+
+
+def _clean_description(text: str) -> str:
+    lines = text.splitlines()
+    cleaned = []
+    seen = set()
+    prev_blank = False
+
+    for line in lines:
+        line = line.strip()
+
+        # Skip boilerplate
+        if _BOILERPLATE_PATTERNS.match(line):
+            continue
+        # Skip very short UI fragments
+        if len(line) <= 2:
+            continue
+        # Skip duplicate lines (e.g. title repeated twice)
+        key = line.lower()
+        if key in seen and len(line) < 80:
+            continue
+        seen.add(key)
+
+        if not line:
+            if not prev_blank and cleaned:
+                cleaned.append("")
+            prev_blank = True
+        else:
+            cleaned.append(line)
+            prev_blank = False
+
+    # Trim leading/trailing blank lines
+    while cleaned and not cleaned[0]:
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1]:
+        cleaned.pop()
+
+    return "\n".join(cleaned)[:6000]
+
+
+async def _fetch_generic_description(url: str) -> Optional[str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return None
+            soup = BeautifulSoup(resp.text, "lxml")
+            page_text_lower = soup.get_text().lower()
+            if any(p in page_text_lower for p in _JS_REQUIRED_PHRASES):
+                return None
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                tag.decompose()
+            for sel in ["#job-description", ".job-description", "[data-testid='job-description']",
+                        "main", "article", ".posting-description", "#job-details", ".content"]:
+                block = soup.select_one(sel)
+                if block:
+                    text = block.get_text(separator="\n", strip=True)
+                    if len(text) > 200:
+                        return _clean_description(text)
+            text = soup.get_text(separator="\n", strip=True)
+            return _clean_description(text) if len(text) > 200 else None
+    except Exception as e:
+        logger.warning(f"Generic fetch failed for {url}: {e}")
+        return None
+
+
+class DescriptionIn(BaseModel):
+    description: str
+
+
+@router.put("/{job_id}/description")
+def save_description(job_id: int, body: DescriptionIn, db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job.description = body.description.strip()
+    db.commit()
+    return {"ok": True}
 
 
 @router.patch("/{job_id}")

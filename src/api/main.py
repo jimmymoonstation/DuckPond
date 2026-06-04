@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.api.database import init_db
-from src.api.routes import analyze, applications, companies, config, discord_history, jobs, learning, mailbox, portal, resumes, scraper, stats
+from src.api.routes import analyze, applications, companies, config, discord_history, interview_prep, jobs, learning, mailbox, notion, portal, resumes, scraper, stats, timeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Duck Hunt 🦆🍔",
+    title="DuckPond 🦆",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -41,7 +41,7 @@ app.add_middleware(
 )
 
 # API routes
-for router in [jobs.router, applications.router, resumes.router, config.router, stats.router, scraper.router, discord_history.router, analyze.router, companies.router, learning.router, mailbox.router, portal.router]:
+for router in [jobs.router, applications.router, resumes.router, config.router, stats.router, scraper.router, discord_history.router, analyze.router, companies.router, learning.router, mailbox.router, portal.router, timeline.router, interview_prep.router, notion.router]:
     app.include_router(router, prefix="/api")
 
 # Health check

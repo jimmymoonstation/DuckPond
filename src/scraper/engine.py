@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.api.database import SessionLocal
-from src.api.models import Job, SearchConfig
+from src.api.models import Job, SearchConfig, TrackedCompany
 from src.scraper import brave, career_pages
 from src.scraper.career_pages import scrape_linkedin_only
 
@@ -63,6 +63,11 @@ async def run_scraper() -> RunStats:
     stats = RunStats()
 
     try:
+        from src.scraper.web_search import reset_ddg_circuit
+        from src.scraper.brave import reset_brave_circuit
+        reset_ddg_circuit()
+        reset_brave_circuit()
+
         config = _load_config()
         titles = json.loads(config.titles_json) if config else []
         locations = json.loads(config.locations_json) if config else []
@@ -170,42 +175,143 @@ def _load_config() -> SearchConfig | None:
         return db.query(SearchConfig).filter_by(is_active=True).first()
 
 
-def _is_already_applied(db, company_name: str, job_title: str, url: str, original_url: str | None) -> bool:
+_SOURCE_PRIORITY = {
+    'greenhouse': 1, 'lever': 2, 'ashby': 3,
+    'workday': 4, 'smartrecruiters': 5, 'amazon': 6,
+    'brave_search': 7, 'linkedin': 8, 'extension': 9, 'manual': 10,
+}
+
+
+def _source_rank(source: str) -> int:
+    base = source.split(':')[0]
+    return _SOURCE_PRIORITY.get(base, 99)
+
+
+import re as _re_engine
+
+def _co_key(s: str) -> str:
+    """Normalize company name for dedup: strip spaces/punctuation/case."""
+    return _re_engine.sub(r'[\s\-_.,&\'"]+', '', s.lower()).strip()
+
+
+def _ttl_key(s: str) -> str:
+    return _re_engine.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def _is_duplicate(db, company_name: str, job_title: str, url: str,
+                  original_url: str | None, source: str) -> bool:
     """
-    Return True if this job is effectively a duplicate of one the user already applied to.
-    Checks:
-      1. Exact URL match against existing job URLs and original_urls (cross-source dedup)
-      2. Same (company, title) as a job that already has an application
+    Return True if this job should be skipped as a duplicate.
+    Checks (in order):
+      1. Exact URL match — same URL already in DB regardless of source
+      2. Same company+title already exists from an equal or better source
+      3. Same company+title already has an application (never show it again)
     """
-    from sqlalchemy import func, text as sa_text
+    from sqlalchemy import func
     from src.api.models import Application
 
-    # Cross-source URL dedup: new job's URL matches an existing job's original_url,
-    # or new job's original_url matches an existing job's URL
+    # 1. URL dedup (cross-source)
     url_checks = [url]
     if original_url:
         url_checks.append(original_url)
-
     for u in url_checks:
-        exists = db.query(Job).filter(
+        if db.query(Job).filter(
             (Job.url == u) | (Job.original_url == u)
-        ).first()
-        if exists:
+        ).first():
             return True
 
-    # Company+title dedup against applied jobs
-    co_norm  = company_name.strip().lower()
-    ttl_norm = job_title.strip().lower()
-    applied_match = (
+    co_key        = _co_key(company_name)
+    ttl_key       = _ttl_key(job_title)
+    incoming_rank = _source_rank(source)
+
+    # 2. Same company+title already exists.
+    # If existing source is better or equal → skip incoming.
+    # If existing source is worse → deactivate it so the better-source version can replace it.
+    candidates = db.query(Job).filter(
+        func.lower(func.trim(Job.job_title)) == job_title.strip().lower(),
+        Job.is_active == True,
+    ).all()
+    for existing in candidates:
+        if _co_key(existing.company_name) == co_key:
+            existing_rank = _source_rank(existing.source)
+            if existing_rank <= incoming_rank:
+                # Existing is equal or better source — skip the incoming
+                return True
+            else:
+                # Incoming is a better source — deactivate the weaker duplicate
+                existing.is_active = False
+
+    # 3. Already applied to this company+title
+    applied_jobs = (
         db.query(Job)
         .join(Application, Application.job_id == Job.id)
-        .filter(
-            func.lower(func.trim(Job.company_name)) == co_norm,
-            func.lower(func.trim(Job.job_title))    == ttl_norm,
-        )
-        .first()
+        .filter(func.lower(func.trim(Job.job_title)) == job_title.strip().lower())
+        .all()
     )
-    return applied_match is not None
+    for j in applied_jobs:
+        if _co_key(j.company_name) == co_key:
+            return True
+
+    return False
+
+
+def _auto_add_company_background(company_name: str, job_url: str, source: str) -> None:
+    """
+    Fire-and-forget: if the company isn't tracked yet, try to detect their ATS
+    and add them so future scrapes cover them.
+    Runs in a thread to avoid blocking the save loop.
+    """
+    import re as _re
+    import threading
+
+    def _run():
+        import asyncio
+        try:
+            # Try to derive ATS from the job URL directly (fastest path)
+            ats_type, ats_slug = None, None
+            patterns = [
+                (r"boards(?:-api)?\.greenhouse\.io/(?:v1/boards/)?([^/?\s]+)", "greenhouse"),
+                (r"jobs\.lever\.co/([^/?\s]+)", "lever"),
+                (r"jobs\.ashbyhq\.com/([^/?\s]+)", "ashby"),
+                (r"([\w-]+)\.(?:wd5|wd1|wd12)\.myworkdayjobs\.com", "workday"),
+                (r"jobs\.smartrecruiters\.com/([^/?\s]+)", "smartrecruiters"),
+            ]
+            for pat, ats in patterns:
+                m = _re.search(pat, job_url, _re.IGNORECASE)
+                if m:
+                    ats_type, ats_slug = ats, m.group(1).lower().rstrip("/")
+                    break
+
+            with SessionLocal() as db:
+                # Double-check not already added by another thread
+                from src.api.models import TrackedCompany as TC
+                if db.query(TC).filter(
+                    TC.company_name.ilike(company_name), TC.is_active == True
+                ).first():
+                    return
+
+                probe = None
+                if ats_type and ats_slug:
+                    probe = {"ats_type": ats_type, "ats_slug": ats_slug, "job_count": 1}
+                else:
+                    # Fall back to probing common ATS slugs
+                    from src.api.routes.companies import _auto_probe
+                    probe = asyncio.run(_auto_probe(company_name))
+
+                if not probe:
+                    return
+
+                from src.api.routes.companies import _save_company
+                existing = db.query(TC).filter_by(
+                    ats_type=probe["ats_type"], ats_slug=probe["ats_slug"]
+                ).first()
+                if not existing:
+                    _save_company(db, company_name, probe)
+                    logger.info(f"Auto-added company: {company_name} ({probe['ats_type']}:{probe['ats_slug']})")
+        except Exception as e:
+            logger.debug(f"Auto-add company failed for {company_name}: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _save_jobs(raw_jobs: list[dict]) -> tuple[int, int]:
@@ -219,14 +325,25 @@ def _save_jobs_with_list(raw_jobs: list[dict]) -> tuple[list[dict], int, int]:
     saved: list[dict] = []
 
     with SessionLocal() as db:
+        # Build normalized name → tracked display name map once per batch
+        _tracked_name_map = {
+            _co_key(r.company_name): r.company_name
+            for r in db.query(TrackedCompany).filter_by(is_active=True).all()
+        }
+
         for data in raw_jobs:
-            # Skip jobs that duplicate something the user already applied to
-            if _is_already_applied(
+            # Canonicalize company name to tracked_companies display name
+            raw_co = data["company_name"]
+            data["company_name"] = _tracked_name_map.get(_co_key(raw_co), raw_co)
+
+            # Skip duplicate jobs
+            if _is_duplicate(
                 db,
                 data["company_name"],
                 data["job_title"],
                 data["url"],
                 data.get("original_url"),
+                data.get("source", ""),
             ):
                 dup_count += 1
                 continue
@@ -243,6 +360,7 @@ def _save_jobs_with_list(raw_jobs: list[dict]) -> tuple[list[dict], int, int]:
                     source=data["source"],
                     description=data.get("description"),
                     posted_at=data.get("posted_at"),
+                    tags=data.get("tags"),
                 )
                 # Use a nested savepoint so a constraint violation on one row
                 # doesn't invalidate the entire session / previously-added rows.
@@ -250,6 +368,12 @@ def _save_jobs_with_list(raw_jobs: list[dict]) -> tuple[list[dict], int, int]:
                     db.add(job)
                 new_count += 1
                 saved.append(data)
+
+                # Auto-add to tracked_companies if not already present
+                co_name = data["company_name"]
+                if _co_key(co_name) not in _tracked_name_map:
+                    _auto_add_company_background(co_name, data.get("url", ""), data.get("source", ""))
+
             except IntegrityError:
                 dup_count += 1
             except Exception as e:

@@ -131,17 +131,37 @@ def _make_job_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:20]
 
 
+_ddg_failures = 0        # consecutive failure counter
+_DDG_FAILURE_LIMIT = 3   # trip the breaker after this many consecutive timeouts
+
+
+def reset_ddg_circuit():
+    """Call at the start of each scraper run to reset the circuit breaker."""
+    global _ddg_failures
+    _ddg_failures = 0
+
+
 def _ddg_text(query: str, max_results: int = 15) -> list[dict]:
-    """Synchronous DDG text search with a short delay to avoid rate limits."""
+    """Synchronous DDG text search with circuit breaker for consecutive timeouts."""
+    global _ddg_failures
     import time
+
+    if _ddg_failures >= _DDG_FAILURE_LIMIT:
+        return []   # breaker open — skip silently
+
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        time.sleep(1.5)   # polite delay
+        _ddg_failures = 0   # success — reset counter
+        time.sleep(1.0)
         return results
     except Exception as e:
-        logger.warning(f"DDG search failed for '{query}': {e}")
+        _ddg_failures += 1
+        if _ddg_failures >= _DDG_FAILURE_LIMIT:
+            logger.warning(f"DDG circuit breaker tripped after {_DDG_FAILURE_LIMIT} consecutive failures — skipping remaining web searches this run")
+        else:
+            logger.warning(f"DDG search failed for '{query}': {e}")
         return []
 
 

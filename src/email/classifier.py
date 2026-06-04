@@ -44,6 +44,25 @@ _RULES = [
         "meet with our team", "moving forward with your application",
         "excited to move you forward", "advance to the next round",
         "invite you to schedule", "book your interview",
+        # Availability requests — very common recruiter phrasing
+        "your availability", "provide your availability", "interview availability",
+        "share your availability", "send your availability",
+        "available for a call", "available to chat", "available to connect",
+        "available to speak", "find a time", "pick a time", "choose a time",
+        "when are you available", "what times work", "what time works",
+        "hop on a call", "quick call", "intro call", "discovery call",
+    ]),
+    # Recruiter outreach and follow-ups — saved but don't auto-update app status
+    ("recruiter", [
+        "following up", "just following up", "wanted to follow up",
+        "checking in", "just checking in", "touching base",
+        "wanted to reach out", "reaching out", "i wanted to connect",
+        "came across your profile", "your background", "your experience",
+        "exciting opportunity", "open role", "open position",
+        "would you be interested", "are you open to",
+        "quick question", "quick note", "quick follow",
+        "re: your application", "update on your application",
+        "heard back", "any updates", "next steps",
     ]),
 ]
 
@@ -128,32 +147,66 @@ def extract_linkedin_preview(body: str) -> str:
     return paragraphs[-1][:300] if paragraphs else ""
 
 
+_GENERIC_DOMAINS = {
+    "gmail", "yahoo", "outlook", "hotmail", "lever", "greenhouse", "ashby",
+    "workday", "smartrecruiters", "linkedin", "indeed", "glassdoor", "jobvite",
+    "icims", "taleo", "successfactors", "workable", "breezy", "bamboohr",
+    "myworkday", "notify", "noreply", "mail", "email", "bounce", "mailer",
+}
+
+
 def extract_company(subject: str, body: str, from_address: str,
-                    known_companies: list[str]) -> str | None:
-    """Try to extract company name from email content."""
-    text = subject + " " + body[:2000]
-
-    # 1. Match against known tracked companies (longest match first)
-    for company in sorted(known_companies, key=len, reverse=True):
-        if company.lower() in text.lower():
-            return company
-
-    # 2. Sender domain heuristic: recruiting@company.com → "Company"
-    domain_match = re.search(r'@([\w-]+)\.(com|io|co|ai|tech)', from_address.lower())
+                    known_companies: list[str]) -> tuple[str | None, str]:
+    """
+    Try to extract company name from email content.
+    Returns (company_name, source) where source is one of:
+      'sender_domain' | 'subject_known' | 'subject_pattern' | 'body_known'
+    Body-sourced matches are lower-confidence and should not auto-update app status.
+    """
+    # ── 1. Sender domain heuristic (highest confidence) ─────────────────────
+    # recruiting@stripe.com → "Stripe"
+    domain_match = re.search(r'@([\w-]+)\.(com|io|co|ai|tech|org|net)', from_address.lower())
     if domain_match:
         raw = domain_match.group(1)
-        # Skip generic job boards
-        if raw not in {"gmail", "yahoo", "outlook", "hotmail", "lever",
-                       "greenhouse", "ashby", "workday", "smartrecruiters",
-                       "linkedin", "indeed", "glassdoor", "jobvite", "icims"}:
-            return raw.replace("-", " ").title()
+        if raw not in _GENERIC_DOMAINS:
+            # Check if domain matches a known tracked company
+            for company in sorted(known_companies, key=len, reverse=True):
+                if raw in company.lower().replace(" ", "").replace("-", ""):
+                    return company, "sender_domain"
+            return raw.replace("-", " ").title(), "sender_domain"
 
-    # 3. Pattern: "at <Company>" or "from <Company>" in subject
-    m = re.search(r'\b(?:at|from|with)\s+([A-Z][A-Za-z0-9& ]{2,30}?)(?:\s+(?:for|is|team|recruiting|HR)|[,!]|$)', subject)
+    # ── 2. Subject-only known-company match (high confidence) ────────────────
+    subj_lower = subject.lower()
+    for company in sorted(known_companies, key=len, reverse=True):
+        if company.lower() in subj_lower:
+            return company, "subject_known"
+
+    # ── 3. Subject pattern: "at/from/with <Company>" ─────────────────────────
+    m = re.search(
+        r'\b(?:at|from|with|to)\s+([A-Z][A-Za-z0-9&. ]{2,30}?)'
+        r'(?:\s+(?:for|is|team|recruiting|HR|about)|[,!.]|$)',
+        subject,
+    )
     if m:
-        return m.group(1).strip()
+        return m.group(1).strip(), "subject_pattern"
 
-    return None
+    # ── 4. First capitalized word(s) in subject, if it looks like a company ──
+    # e.g. "Deloitte Follow Up" → "Deloitte"
+    m2 = re.match(r'^([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)?)\s+\w', subject)
+    if m2:
+        candidate = m2.group(1).strip()
+        # Reject generic words
+        if candidate.lower() not in {"thank", "your", "update", "re", "fwd",
+                                      "application", "congratulations", "sorry"}:
+            return candidate, "subject_pattern"
+
+    # ── 5. Body-only known-company match (low confidence) ────────────────────
+    body_short = body[:500].lower()
+    for company in sorted(known_companies, key=len, reverse=True):
+        if company.lower() in body_short:
+            return company, "body_known"
+
+    return None, "none"
 
 
 def extract_job_title(subject: str, body: str) -> str | None:

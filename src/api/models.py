@@ -25,6 +25,7 @@ class Job(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     user_feedback = Column(Text)
     feedback_at = Column(DateTime)
+    tags = Column(Text)              # JSON array e.g. ["startup","yc","w24"]
 
     applications = relationship("Application", back_populates="job")
 
@@ -39,6 +40,9 @@ class Application(Base):
     applied_at = Column(DateTime)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
     notes = Column(Text)
+
+    prep_notes = Column(Text)    # JSON: AI-generated interview prep, keyed by section
+    notion_page_id = Column(String)  # Notion page ID auto-created when status → interview
 
     job = relationship("Job", back_populates="applications")
     resume = relationship("Resume", back_populates="applications")
@@ -115,6 +119,18 @@ class TrackedCompany(Base):
     discovered_from = Column(String, nullable=False, default="manual")  # manual|seed|auto
     added_at = Column(DateTime, default=func.now(), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+
+
+class NotionConfig(Base):
+    __tablename__ = "notion_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    api_token = Column(String)                        # secret_xxx integration token
+    interviews_parent_page_id = Column(String)        # Notion page under which interview pages are created
+    context_page_ids = Column(Text, default="[]")     # JSON array: extra pages fed to Claude as context
+    tracker_db_id = Column(String)                    # legacy: optional DB sync
+    is_enabled = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class DiscordSession(Base):

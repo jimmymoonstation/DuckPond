@@ -3,14 +3,19 @@ let currentJobPage = 0;
 let pendingJobId = null;
 let pendingAppId = null;
 let jobSort = { by: 'discovered_at', dir: 'desc' };
-let careerSites = {};  // company name (lowercase) → career homepage URL
+let careerSites = {};        // company name (lowercase) → career homepage URL (from scraper const)
+let trackedCompanies = {};   // company name (lowercase) → career_url|null  (all active tracked)
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Load career sites before rendering jobs so company links are ready
-  const sites = await apiFetch('/jobs/career-sites');
-  if (sites) careerSites = sites;
+  // Load career sites + tracked company names (parallel)
+  const [sites, tracked] = await Promise.all([
+    apiFetch('/jobs/career-sites'),
+    apiFetch('/companies/names'),
+  ]);
+  if (sites)   careerSites = sites;
+  if (tracked) trackedCompanies = tracked;
 
   setupTabs();
   markPondViewed(); // opening the app on The Pond counts as viewing it
@@ -51,23 +56,45 @@ async function checkNewJobs() {
   }
 }
 
+function switchTab(tabName, pushState = true) {
+  const btn = document.querySelector(`.tab[data-tab="${tabName}"]`);
+  if (!btn) return;
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(s => s.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(`tab-${tabName}`).classList.add('active');
+  if (pushState) history.pushState(null, '', `#${tabName}`);
+  if (tabName === 'board')     markPondViewed();
+  if (tabName === 'tracker')   loadApplications();
+  if (tabName === 'resumes')   loadResumes();
+  if (tabName === 'config')    loadConfig();
+  if (tabName === 'companies') loadCompanies();
+  if (tabName === 'mailbox')     loadMailbox();
+  if (tabName === 'messages')   loadLinkedInMessages();
+  if (tabName === 'analysis')   loadAnalysis();
+  if (tabName === 'interviews') loadInterviewPrep();
+}
+
 function setupTabs() {
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(s => s.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-      if (btn.dataset.tab === 'board') markPondViewed();
-      if (btn.dataset.tab === 'tracker') loadApplications();
-      if (btn.dataset.tab === 'resumes') loadResumes();
-      if (btn.dataset.tab === 'config') loadConfig();
-      if (btn.dataset.tab === 'companies') loadCompanies();
-      if (btn.dataset.tab === 'mailbox') loadMailbox();
-      if (btn.dataset.tab === 'messages') loadLinkedInMessages();
-      if (btn.dataset.tab === 'analysis') loadAnalysis();
+      switchTab(btn.dataset.tab);
     });
   });
+
+  // Restore tab from URL hash on load
+  const hash = location.hash.replace('#', '');
+  if (hash && document.querySelector(`.tab[data-tab="${hash}"]`)) {
+    switchTab(hash, false);
+  }
+
+  // Handle browser back/forward
+  window.addEventListener('popstate', () => {
+    const h = location.hash.replace('#', '') || 'board';
+    switchTab(h, false);
+  });
+
+  window.switchToTracker = () => switchTab('tracker');
 
   document.getElementById('btn-add-job').addEventListener('click', openAddJobModal);
   document.getElementById('aj-cancel').addEventListener('click', closeAddJobModal);
@@ -78,6 +105,8 @@ function setupTabs() {
   document.getElementById('search-loc').addEventListener('input', debounce(() => loadJobs(), 400));
   document.getElementById('filter-status').addEventListener('change', loadApplications);
   document.getElementById('btn-save-config').addEventListener('click', saveConfig);
+  document.getElementById('btn-save-notion').addEventListener('click', saveNotionConfig);
+  document.getElementById('btn-test-notion').addEventListener('click', testNotionConnection);
   setupResumeModal();
   document.getElementById('modal-cancel').addEventListener('click', closeModal);
   document.getElementById('modal-confirm').addEventListener('click', confirmApply);
@@ -153,35 +182,51 @@ async function loadJobs(showLoading = true) {
   if (loc) params.set('location', loc);
 
   const data = await apiFetch(`/jobs?${params}`);
-  if (!data) return;
+  if (!data) {
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">Failed to load — <a href="#" onclick="loadJobs();return false" style="color:#3ddc6b">Retry</a></td></tr>';
+    return;
+  }
 
   if (!data.jobs.length) {
     tbody.innerHTML = '<tr><td colspan="8" class="loading">No new openings found. Configure search or run scraper.</td></tr>';
     return;
   }
 
+  try {
   tbody.innerHTML = data.jobs.map(j => `
     <tr>
       <td>
+        <a href="${esc(j.url)}" target="_blank" title="Open job posting">${esc(j.job_title)}</a>
         ${j.original_url
-          ? `<a href="${j.original_url}" target="_blank" title="Open on company career site">${esc(j.job_title)}</a>
-             <a href="${j.url}" target="_blank" title="Open source (${esc(j.source.split(':')[0])})" style="color:var(--text-dim);font-size:10px;margin-left:4px">↗src</a>`
-          : `<a href="${j.url}" target="_blank">${esc(j.job_title)}</a>`
-        }
+          ? `<a href="${esc(j.original_url)}" target="_blank" title="View LinkedIn post" style="color:var(--text-dim);font-size:10px;margin-left:5px;text-decoration:none">↗LI</a>`
+          : ''}
       </td>
       <td>${companyLink(j.company_name)}</td>
       <td>${j.location ? esc(j.location) : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td>${j.level ? `<span class="badge badge-new">${esc(j.level)}</span>` : '—'}</td>
-      <td><span class="source-chip">${esc(j.source.split(':')[0])}</span></td>
+      <td>
+        <span class="source-chip">${esc(j.source.split(':')[0])}</span>
+        ${j.tags && JSON.parse(j.tags).includes('yc')
+          ? `<span class="badge badge-yc" title="Y Combinator startup">YC</span>`
+          : ''}
+      </td>
       <td style="color:var(--text-dim);font-size:12px">${j.posted_at ? `<span title="${fmtExact(j.posted_at)}">${timeAgo(j.posted_at)}</span>` : '<span style="color:var(--border)">—</span>'}</td>
       <td style="color:var(--text-dim);font-size:12px"><span title="${fmtExact(j.discovered_at)}">${timeAgo(j.discovered_at)}</span></td>
       <td>
-        <button class="btn-primary btn-sm" onclick="openApplyModal(${j.id})">Apply</button>
+        ${j.already_applied
+          ? `<span class="badge badge-applied" title="You already applied to this role at ${esc(j.company_name)}">✓ Applied</span>`
+          : `<button class="btn-primary btn-sm" onclick="openApplyModal(${j.id})">Apply</button>`
+        }
         <button class="btn-secondary btn-sm" style="margin-left:4px" onclick="saveJob(${j.id})">Save</button>
         <button class="btn-feedback btn-sm" style="margin-left:4px" onclick="openFeedbackModal(${j.id})" data-label="${esc(j.job_title)} @ ${esc(j.company_name)}">✕</button>
       </td>
     </tr>
   `).join('');
+  } catch(err) {
+    console.error('Jobs render error:', err);
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">Render error — <a href="#" onclick="loadJobs();return false" style="color:#3ddc6b">Retry</a></td></tr>';
+    return;
+  }
 
   renderPagination(data.total, 50, currentJobPage);
 }
@@ -313,7 +358,8 @@ async function loadApplications() {
   const params = new URLSearchParams({ limit: 200 });
   if (status) params.set('status', status);
   const data = await apiFetch(`/applications?${params}`);
-  if (!data?.applications.length) {
+  if (!data) { tbody.innerHTML = '<tr><td colspan="7" class="loading">Could not load — click Refresh to retry.</td></tr>'; return; }
+  if (!data.applications.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="loading">No applications yet. Start applying from the Job Board.</td></tr>';
     return;
   }
@@ -344,8 +390,18 @@ function appsSort(col) {
 
 function _renderAppsTable() {
   const tbody = document.getElementById('apps-body');
+  const q = (document.getElementById('apps-search')?.value || '').toLowerCase().trim();
+
+  const filtered = q
+    ? _appsData.filter(a =>
+        a.job.job_title.toLowerCase().includes(q) ||
+        a.job.company_name.toLowerCase().includes(q) ||
+        (a.notes || '').toLowerCase().includes(q)
+      )
+    : _appsData;
+
   const { by, dir } = _appsSortState;
-  const sorted = [..._appsData].sort((a, b) => {
+  const sorted = [...filtered].sort((a, b) => {
     let av, bv;
     if (by === 'title')   { av = a.job.job_title.toLowerCase();   bv = b.job.job_title.toLowerCase(); }
     else if (by === 'company') { av = a.job.company_name.toLowerCase(); bv = b.job.company_name.toLowerCase(); }
@@ -357,8 +413,13 @@ function _renderAppsTable() {
   });
   tbody.innerHTML = sorted.map(a => `
     <tr>
-      <td><a href="${a.job.url}" target="_blank">${esc(a.job.job_title)}</a></td>
-      <td>${esc(a.job.company_name)}</td>
+      <td>
+        <a href="${esc(a.job.url)}" target="_blank">${esc(a.job.job_title)}</a>
+        ${a.job.original_url
+          ? `<a href="${esc(a.job.original_url)}" target="_blank" title="View LinkedIn post" style="color:var(--text-dim);font-size:10px;margin-left:5px;text-decoration:none">↗LI</a>`
+          : ''}
+      </td>
+      <td>${appCompanyCell(a)}</td>
       <td style="font-size:12px;color:var(--text-dim)">${a.applied_at ? formatDate(a.applied_at) : '—'}</td>
       <td><span class="badge badge-${a.status}">${a.status.replace('_', ' ')}</span></td>
       <td style="font-size:12px;color:var(--text-dim)">${a.resume?.name ?? '—'}</td>
@@ -368,6 +429,52 @@ function _renderAppsTable() {
       </td>
     </tr>
   `).join('');
+}
+
+function isCompanyTracked(name) {
+  const nk = normCoKey(name);
+  if (name.toLowerCase() in trackedCompanies) return true;
+  return Object.keys(trackedCompanies).some(k => normCoKey(k) === nk);
+}
+
+function appCompanyCell(app) {
+  const name      = app.job.company_name;
+  const careerUrl = getCareerUrl(name);
+  const tracked   = isCompanyTracked(name);
+
+  if (careerUrl) {
+    return `<a href="${esc(careerUrl)}" target="_blank" class="company-tracked" title="Open career site">${esc(name)}</a>`;
+  }
+  if (tracked) {
+    return `<span class="company-tracked" title="Tracked — no career URL">${esc(name)}</span>`;
+  }
+  return `<span class="company-untracked">${esc(name)}</span>`
+    + `<button class="btn-discover" id="disc-${app.id}" onclick="discoverCompany('${esc(name)}',${app.id})" title="Auto-research ${esc(name)} and add to tracker">🔍</button>`;
+}
+
+async function discoverCompany(name, appId) {
+  const btn = document.getElementById(`disc-${appId}`);
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+
+  const res = await apiFetch('/companies/auto-discover', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ company_name: name }),
+  });
+
+  if (res?.status === 'added' || res?.status === 'exists') {
+    // Refresh tracked list then re-render
+    const tracked = await apiFetch('/companies/names');
+    if (tracked) trackedCompanies = tracked;
+    _renderAppsTable();
+  } else {
+    if (btn) {
+      btn.textContent = '✕';
+      btn.title = res?.message || 'Not found on any ATS';
+      btn.style.color = 'var(--red)';
+      btn.disabled = false;
+    }
+  }
 }
 
 // ── Status Modal ──────────────────────────────────────────────────────────────
@@ -461,6 +568,7 @@ async function loadConfig() {
   document.getElementById('cfg-levels').value = cfg.levels.join(', ');
   document.getElementById('cfg-keywords').value = cfg.keywords.join(', ');
   document.getElementById('cfg-excluded').value = cfg.excluded_companies.join(', ');
+  loadNotionConfig();
 }
 
 async function saveConfig() {
@@ -485,7 +593,8 @@ async function loadResumes() {
   const tbody = document.getElementById('resumes-body');
   tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
   const data = await apiFetch('/resumes');
-  if (!data?.resumes.length) {
+  if (!data) { tbody.innerHTML = '<tr><td colspan="6" class="loading">Could not load — click Refresh to retry.</td></tr>'; return; }
+  if (!data.resumes.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="loading">No resumes yet. Upload your first one.</td></tr>';
     return;
   }
@@ -627,33 +736,62 @@ async function triggerScrape() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function apiFetch(path, opts = {}) {
-  try {
-    const res = await fetch(API + path, {
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
-      ...opts,
-    });
-    if (res.status === 204) return null;
-    return res.ok ? res.json() : null;
-  } catch (e) {
-    console.error('API error:', e);
-    return null;
+async function apiFetch(path, opts = {}, _retries = 2) {
+  for (let attempt = 0; attempt <= _retries; attempt++) {
+    try {
+      const res = await fetch(API + path, {
+        headers: { 'Content-Type': 'application/json', ...opts.headers },
+        ...opts,
+      });
+      if (res.status === 204) return null;
+      if (res.ok) return res.json();
+      return null;
+    } catch (e) {
+      if (attempt < _retries) {
+        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+      } else {
+        console.error('API error after retries:', path, e);
+      }
+    }
   }
+  return null;
 }
 
 function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function normCoKey(name) {
+  return name.toLowerCase().replace(/[\s\-_.,&'"]+/g, '');
+}
+
+function getCareerUrl(name) {
+  const exact = trackedCompanies[name.toLowerCase()];
+  if (exact) return exact;
+  const norm = normCoKey(name);
+  for (const [k, v] of Object.entries(trackedCompanies)) {
+    if (normCoKey(k) === norm) return v;
+  }
+  return careerSites[name.toLowerCase()] || null;
+}
+
 function companyLink(name) {
-  const url = careerSites[name.toLowerCase()];
+  const url = getCareerUrl(name);
   return url
-    ? `<a href="${url}" target="_blank" title="Open ${esc(name)} careers page">${esc(name)}</a>`
+    ? `<a href="${esc(url)}" target="_blank" title="Open ${esc(name)} careers page">${esc(name)}</a>`
     : esc(name);
 }
 
+const _PT = 'America/Los_Angeles';
+
 function formatDate(iso) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  if (!iso) return '—';
+  const ts = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z';
+  return new Date(ts).toLocaleString('en-US', {
+    timeZone: _PT,
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  });
 }
 
 function timeAgo(iso) {
@@ -667,13 +805,14 @@ function timeAgo(iso) {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDate(iso);
 }
 
 function fmtExact(iso) {
   if (!iso) return '';
   const ts = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z';
   return new Date(ts).toLocaleString('en-US', {
+    timeZone: _PT,
     month: 'short', day: 'numeric', year: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true,
   });
@@ -753,6 +892,8 @@ function setupPortal() {
 
 let allCompanies = [];
 
+let _coSortState = { by: 'added_at', dir: 'desc' };
+
 async function loadCompanies() {
   const data = await apiFetch('/companies');
   if (!data) return;
@@ -764,38 +905,75 @@ async function loadCompanies() {
   document.getElementById('co-filter-active').onchange = renderCompanies;
 }
 
+function companiesSort(col) {
+  if (_coSortState.by === col) {
+    _coSortState.dir = _coSortState.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _coSortState.by  = col;
+    _coSortState.dir = col === 'added_at' ? 'desc' : 'asc';
+  }
+  // Update header arrows
+  document.querySelectorAll('#companies-thead .sortable').forEach(th => {
+    th.classList.remove('sort-active');
+    th.querySelector('.sort-arrow').textContent = ' ⇅';
+  });
+  const colIdx = { company_name: 0, ats_type: 1, added_at: 5 };
+  const th = document.querySelectorAll('#companies-thead th')[colIdx[col]];
+  if (th) {
+    th.classList.add('sort-active');
+    th.querySelector('.sort-arrow').textContent = _coSortState.dir === 'asc' ? ' ▲' : ' ▼';
+  }
+  renderCompanies();
+}
+
 function renderCompanies() {
-  const q = document.getElementById('co-search').value.toLowerCase();
-  const atsFilter = document.getElementById('co-filter-ats').value;
+  const q           = document.getElementById('co-search').value.toLowerCase();
+  const atsFilter   = document.getElementById('co-filter-ats').value;
   const activeFilter = document.getElementById('co-filter-active').value;
 
-  const filtered = allCompanies.filter(c => {
-    if (q && !c.company_name.toLowerCase().includes(q) && !c.ats_slug.toLowerCase().includes(q) && !c.ats_type.toLowerCase().includes(q)) return false;
+  let filtered = allCompanies.filter(c => {
+    if (q && !c.company_name.toLowerCase().includes(q) &&
+             !c.ats_slug.toLowerCase().includes(q) &&
+             !c.ats_type.toLowerCase().includes(q)) return false;
     if (atsFilter && c.ats_type !== atsFilter) return false;
-    if (activeFilter === 'true' && !c.is_active) return false;
-    if (activeFilter === 'false' && c.is_active) return false;
+    if (activeFilter === 'true'  && !c.is_active) return false;
+    if (activeFilter === 'false' &&  c.is_active) return false;
     return true;
+  });
+
+  // Sort
+  const { by, dir } = _coSortState;
+  filtered = [...filtered].sort((a, b) => {
+    const av = (a[by] || '').toLowerCase();
+    const bv = (b[by] || '').toLowerCase();
+    return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
   });
 
   const tbody = document.getElementById('companies-body');
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="loading">No companies match.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">No companies match.</td></tr>';
     return;
   }
+
+  const SOURCE_LABEL = { manual: 'Manual', seed: 'Seed', auto: 'Auto', portal: 'Portal' };
 
   tbody.innerHTML = filtered.map(c => {
     const badge = ATS_BADGE[c.ats_type] || { label: c.ats_type, cls: 'badge-gray' };
     const careerLink = c.career_url
       ? `<a href="${esc(c.career_url)}" target="_blank" title="Open career page">↗</a>`
       : '—';
+    const addedDate = c.added_at ? formatDate(c.added_at) : '—';
+    const sourceLabel = SOURCE_LABEL[c.discovered_from] || c.discovered_from;
     const activeToggle = c.is_active
-      ? `<button class="btn-tiny btn-active" onclick="toggleCompany(${c.id}, false)" title="Deactivate">✓ Active</button>`
-      : `<button class="btn-tiny btn-inactive" onclick="toggleCompany(${c.id}, true)" title="Activate">✗ Inactive</button>`;
+      ? `<button class="btn-tiny btn-active"   onclick="toggleCompany(${c.id}, false)">✓ Active</button>`
+      : `<button class="btn-tiny btn-inactive" onclick="toggleCompany(${c.id}, true)">✗ Inactive</button>`;
     return `<tr class="${c.is_active ? '' : 'row-inactive'}">
       <td>${esc(c.company_name)}</td>
       <td><span class="badge ${badge.cls}">${badge.label}</span></td>
       <td><code>${esc(c.ats_slug)}</code></td>
       <td>${careerLink}</td>
+      <td style="font-size:12px;color:var(--text-dim)">${sourceLabel}</td>
+      <td style="font-size:12px;color:var(--text-dim)">${addedDate}</td>
       <td>${activeToggle}</td>
       <td><button class="btn-tiny btn-danger" onclick="deleteCompany(${c.id}, '${esc(c.company_name)}')">Delete</button></td>
     </tr>`;
@@ -878,6 +1056,7 @@ const CATEGORY_LABEL = {
   rejection:           'Rejection',
   application_confirm: 'Confirmation',
   linkedin_message:    'LinkedIn DM',
+  recruiter:           'Recruiter',
   other:               'Other',
 };
 const CATEGORY_CLASS = {
@@ -887,6 +1066,7 @@ const CATEGORY_CLASS = {
   rejection:           'badge-orange',
   application_confirm: 'badge-teal',
   linkedin_message:    'badge-blue',
+  recruiter:           'badge-yellow',
   other:               'badge-gray',
 };
 
@@ -954,8 +1134,20 @@ function renderMailboxTable() {
     return;
   }
 
+  const q   = (document.getElementById('mailbox-search')?.value || '').toLowerCase().trim();
+  const cat = document.getElementById('mailbox-filter-cat')?.value || '';
+
+  const filtered = mailboxEvents.filter(e => {
+    if (cat && e.category !== cat) return false;
+    if (q) {
+      const hay = ((e.company_name || '') + ' ' + (e.from_name || '') + ' ' + (e.subject || '')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
   const { by, dir } = mailboxSortState;
-  const sorted = [...mailboxEvents].sort((a, b) => {
+  const sorted = [...filtered].sort((a, b) => {
     let av = by === 'company' ? (a.company_name || a.from_name || '') :
              by === 'category' ? (a.category || '') :
              (a.received_at || '');
@@ -966,21 +1158,113 @@ function renderMailboxTable() {
     return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
   });
 
+  if (!sorted.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">No emails match your search.</td></tr>';
+    return;
+  }
+
   tbody.innerHTML = sorted.map(e => {
-    const recv = e.received_at ? new Date(e.received_at + 'Z').toLocaleDateString() : '—';
+    const recv = e.received_at ? formatDate(e.received_at) : '—';
     const appLink = e.linked_application_id
       ? `<a href="#" onclick="switchToTracker(${e.linked_application_id})" style="color:var(--accent)">View</a>`
       : '<span style="color:var(--text-dim)">—</span>';
-    return `<tr>
+    return `<tr data-event-id="${e.id}">
       <td style="font-size:18px;text-align:center">${e.icon}</td>
-      <td><strong>${esc(e.company_name || e.from_name || '?')}</strong></td>
+      <td class="mailbox-company-cell" onclick="startEditCompany(${e.id},this)" title="Click to edit">
+        <strong>${esc(e.company_name || e.from_name || '?')}</strong>
+        <span class="edit-hint">✎</span>
+      </td>
       <td style="font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.subject)}">${esc(e.subject)}</td>
-      <td><span class="ats-badge ${CATEGORY_CLASS[e.category] || 'badge-gray'}">${CATEGORY_LABEL[e.category] || e.category}</span></td>
+      <td class="mailbox-cat-cell" onclick="startEditCategory(${e.id},this,'${e.category}')" title="Click to change category">
+        <span class="ats-badge ${CATEGORY_CLASS[e.category]||'badge-gray'}">${CATEGORY_LABEL[e.category]||e.category}</span>
+        <span class="edit-hint">✎</span>
+      </td>
       <td style="font-size:12px;color:var(--text-dim)">${recv}</td>
       <td>${appLink}</td>
     </tr>`;
   }).join('');
 }
+
+const _ALL_CATS = ['offer','interview','assessment','rejection','application_confirm','recruiter','linkedin_message','other'];
+
+function startEditCategory(eventId, cell, current) {
+  // Already in edit mode — don't re-enter (prevents click-bubble re-trigger)
+  if (cell.querySelector('select')) return;
+
+  const opts = _ALL_CATS
+    .map(c => `<option value="${c}"${c===current?' selected':''}>${CATEGORY_LABEL[c]||c}</option>`)
+    .join('');
+  cell.innerHTML = `<select style="background:var(--surface2);border:1px solid var(--accent);color:var(--text);padding:3px 6px;border-radius:4px;font-size:12px;outline:none">${opts}</select>`;
+  const sel = cell.querySelector('select');
+
+  // Stop clicks on the select bubbling up to the <td onclick> which would re-run this function
+  sel.addEventListener('click', e => e.stopPropagation());
+
+  sel.addEventListener('change', () => commitEditCategory(eventId, sel));
+  sel.addEventListener('keydown', e => { if (e.key === 'Escape') renderMailboxTable(); });
+  sel.focus();
+}
+
+async function commitEditCategory(eventId, sel) {
+  const val = sel.value;
+  await patchMailboxEvent(eventId, { category: val }, sel.parentElement);
+}
+
+function startEditCompany(eventId, cell) {
+  if (cell.querySelector('input')) return; // already editing
+
+  const current = cell.querySelector('strong').textContent;
+  cell.innerHTML = `<input class="mailbox-company-input" value="${esc(current)}" style="width:120px;background:var(--surface2);border:1px solid var(--accent);color:var(--text);padding:3px 6px;border-radius:4px;font-size:12px" />`
+    + `<button class="_confirm-btn" style="margin-left:4px;padding:2px 7px;font-size:11px;background:var(--accent);color:#050f07;border:none;border-radius:4px;cursor:pointer">✓</button>`
+    + `<button class="_cancel-btn" style="margin-left:2px;padding:2px 7px;font-size:11px;background:var(--surface2);color:var(--text-dim);border:1px solid var(--border);border-radius:4px;cursor:pointer">✕</button>`;
+  const inp = cell.querySelector('input');
+
+  // Stop all child clicks from bubbling to <td onclick>
+  cell.querySelectorAll('input,button').forEach(el =>
+    el.addEventListener('click', e => e.stopPropagation())
+  );
+  cell.querySelector('._confirm-btn').addEventListener('mousedown', e => {
+    e.preventDefault();
+    commitEditCompany(eventId, inp);
+  });
+  cell.querySelector('._cancel-btn').addEventListener('mousedown', e => {
+    e.preventDefault();
+    renderMailboxTable();
+  });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  commitEditCompany(eventId, inp);
+    if (e.key === 'Escape') renderMailboxTable();
+  });
+  inp.focus();
+}
+
+async function commitEditCompany(eventId, inp) {
+  const val = inp.value.trim();
+  if (!val) return;
+  await patchMailboxEvent(eventId, { company_name: val }, inp.parentElement);
+}
+
+async function patchMailboxEvent(eventId, patch, feedbackEl) {
+  const res = await apiFetch(`/mailbox/events/${eventId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (res) {
+    // Update local data so re-render is instant
+    const ev = mailboxEvents.find(e => e.id === eventId);
+    if (ev) {
+      if (patch.category) { ev.category = patch.category; ev.icon = _CATEGORY_ICONS[patch.category] || '📧'; }
+      if (patch.company_name) ev.company_name = patch.company_name;
+    }
+    renderMailboxTable();
+  }
+}
+
+const _CATEGORY_ICONS = {
+  offer:'🎉', interview:'📅', assessment:'📝',
+  rejection:'❌', application_confirm:'✅', recruiter:'📨', linkedin_message:'💬', other:'📧',
+};
 
 async function loadLinkedInMessages() {
   const data = await apiFetch('/mailbox/linkedin-messages?limit=30');
@@ -1004,7 +1288,7 @@ async function loadLinkedInMessages() {
     const sender = esc(m.sender_name || m.from_name || 'LinkedIn User');
     const preview = esc(m.preview || m.subject || '');
     const date = m.received_at
-      ? new Date(m.received_at + 'Z').toLocaleDateString([], {month:'short', day:'numeric'})
+      ? formatDate(m.received_at)
       : '';
     return `<div style="background:var(--card-bg);border:1px solid var(--border);border-left:3px solid #0077b5;border-radius:6px;padding:12px 14px;display:flex;align-items:flex-start;gap:12px">
       <div style="width:36px;height:36px;border-radius:50%;background:#0077b5;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;flex-shrink:0">${esc(sender[0] || '?')}</div>
@@ -1257,4 +1541,297 @@ function _renderCompanies(companies) {
       },
     },
   });
+}
+
+// ── Interviews ─────────────────────────────────────────────────────────────────
+
+let _interviewApps = [];
+
+async function loadInterviewPrep() {
+  const container = document.getElementById('interviews-list');
+  if (!container) return;
+  container.innerHTML = '<div style="padding:60px;text-align:center;color:#628a6a">Loading…</div>';
+  const apps = await apiFetch('/interview-prep');
+  _interviewApps = apps || [];
+  _renderInterviewCards();
+}
+
+function _renderInterviewCards() {
+  const container = document.getElementById('interviews-list');
+  if (!container) return;
+  if (!_interviewApps.length) {
+    container.innerHTML = `
+      <div style="padding:60px;text-align:center;color:#628a6a">
+        <div style="font-size:36px;margin-bottom:12px">🎯</div>
+        <div style="font-size:14px;font-weight:600;color:#dff0d4">No active interviews yet</div>
+        <div style="font-size:12px;margin-top:6px">Applications in phone screen, interview, or offer stage will appear here.</div>
+      </div>`;
+    return;
+  }
+  container.innerHTML = _interviewApps.map(_renderInterviewCard).join('');
+}
+
+function _toggleInterviewCard(id) {
+  const card = document.getElementById(`icard-${id}`);
+  const body = document.getElementById(`ibody-${id}`);
+  const chevron = document.getElementById(`ichevron-${id}`);
+  if (!card || !body) return;
+  const isOpen = !body.classList.contains('hidden');
+  body.classList.toggle('hidden', isOpen);
+  card.classList.toggle('icard-collapsed', isOpen);
+  if (chevron) chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+}
+
+function _renderInterviewCard(a) {
+  const statusColors = { phone_screen: '#74c0fc', interview: '#69db7c', offer: '#c084fc' };
+  const statusLabels = { phone_screen: 'Phone Screen', interview: 'Interview', offer: 'Offer 🎉' };
+  const color = statusColors[a.status] || '#adb5bd';
+  const label = statusLabels[a.status] || a.status;
+
+  let prep = null;
+  try { prep = a.prep_notes ? JSON.parse(a.prep_notes) : null; } catch (e) {}
+  const prepHtml = prep ? _renderPrepContent(prep) : '';
+
+  const descHtml = a.job.description
+    ? `<div class="icard-desc">
+        <div class="icard-desc-label">Job Description</div>
+        <div class="icard-desc-text" id="idesc-${a.id}">
+          ${esc(a.job.description.slice(0, 600))}${a.job.description.length > 600
+            ? `<span id="idesc-more-${a.id}" style="display:none">${esc(a.job.description.slice(600, 3000))}</span>
+               <button class="icard-desc-toggle" onclick="event.stopPropagation();_toggleDesc(${a.id})">Show more</button>`
+            : ''}
+        </div>
+      </div>`
+    : `<div class="icard-desc" id="idesc-wrap-${a.id}">
+        <button class="btn-secondary btn-sm" onclick="event.stopPropagation();fetchJobDescription(${a.id},${a.job.id})" id="ifetch-${a.id}" style="font-size:11px">⬇ Fetch Job Description</button>
+      </div>`;
+
+  const notionHtml = `<div id="inotion-${a.id}">
+    ${a.notion_page_id
+      ? `<a href="https://notion.so/${a.notion_page_id.replace(/-/g,'')}" target="_blank" class="inotion-link" onclick="event.stopPropagation()">↗ Notion</a>`
+      : `<button class="btn-secondary btn-sm inotion-create" onclick="event.stopPropagation();createNotionPage(${a.id})">+ Notion Page</button>`
+    }
+  </div>`;
+
+  return `
+    <div class="interview-card icard-collapsed" id="icard-${a.id}">
+      <div class="icard-header" onclick="_toggleInterviewCard(${a.id})" style="cursor:pointer">
+        <svg id="ichevron-${a.id}" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:#628a6a;transition:transform 0.2s;transform:rotate(0deg)"><polyline points="6,4 10,8 6,12"/></svg>
+        <div class="icard-info">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="icard-status" style="background:${color}22;color:${color};border:1px solid ${color}44">${label}</span>
+            <span style="font-weight:700;font-size:14px;color:#dff0d4">${esc(a.job.job_title)}</span>
+            <span style="color:#628a6a">at</span>
+            <span style="font-weight:600;color:#adc9a0">${esc(a.job.company_name)}</span>
+            ${a.job.level ? `<span class="badge">${esc(a.job.level)}</span>` : ''}
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+            ${a.applied_at ? `<span style="font-size:11px;color:#628a6a">Applied ${formatDate(a.applied_at)}</span>` : ''}
+            ${notionHtml}
+          </div>
+        </div>
+        <button class="btn-secondary" id="ibtn-${a.id}" onclick="event.stopPropagation();generatePrep(${a.id})" style="white-space:nowrap;flex-shrink:0;margin-left:auto">
+          ${prep ? '↺ Regenerate' : '✨ Generate Prep'}
+        </button>
+      </div>
+      <div class="icard-body hidden" id="ibody-${a.id}">
+        ${descHtml}
+        <div class="icard-prep${prepHtml ? '' : ' hidden'}" id="iprep-${a.id}">${prepHtml}</div>
+        ${!prepHtml ? `<div style="padding:16px 0 4px;font-size:12px;color:#628a6a">Click <em>Generate Prep</em> to build AI-powered interview preparation for this role.</div>` : ''}
+      </div>
+    </div>`;
+}
+
+async function fetchJobDescription(appId, jobId) {
+  const btn = document.getElementById(`ifetch-${appId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Fetching…'; }
+
+  const res = await apiFetch(`/jobs/${jobId}/fetch-description`, { method: 'POST' });
+
+  const wrap = document.getElementById(`idesc-wrap-${appId}`);
+  if (res?.description && wrap) {
+    const desc = res.description;
+    const app = _interviewApps.find(a => a.id === appId);
+    if (app) app.job.description = desc;
+
+    const preview = esc(desc.slice(0, 600));
+    const more = desc.length > 600
+      ? `<span id="idesc-more-${appId}" style="display:none">${esc(desc.slice(600, 3000))}</span>
+         <button class="icard-desc-toggle" onclick="event.stopPropagation();_toggleDesc(${appId})">Show more</button>`
+      : '';
+    wrap.innerHTML = `
+      <div class="icard-desc-label">Job Description</div>
+      <div class="icard-desc-text" id="idesc-${appId}">${preview}${more}</div>`;
+  } else {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⬇ Fetch Job Description';
+    }
+    // Show paste fallback
+    if (wrap) {
+      wrap.innerHTML += `
+        <div style="margin-top:8px">
+          <div style="font-size:11px;color:#628a6a;margin-bottom:4px">Auto-fetch failed (job may require login) — paste the description here:</div>
+          <textarea id="idesc-paste-${appId}" rows="5" style="width:100%;background:#0a1a0d;border:1px solid #1c3020;border-radius:6px;color:#c5ddc0;font-size:12px;padding:8px;resize:vertical" placeholder="Paste job description…" onclick="event.stopPropagation()"></textarea>
+          <button class="btn-secondary btn-sm" style="margin-top:6px;font-size:11px" onclick="event.stopPropagation();saveDescriptionPaste(${appId},${jobId})">Save Description</button>
+        </div>`;
+    }
+  }
+}
+
+async function saveDescriptionPaste(appId, jobId) {
+  const ta = document.getElementById(`idesc-paste-${appId}`);
+  const desc = ta?.value.trim();
+  if (!desc) return;
+
+  const res = await apiFetch(`/jobs/${jobId}/description`, { method: 'PUT', body: JSON.stringify({ description: desc }) });
+  if (res) {
+    const app = _interviewApps.find(a => a.id === appId);
+    if (app) app.job.description = desc;
+    const wrap = document.getElementById(`idesc-wrap-${appId}`);
+    if (wrap) {
+      const preview = esc(desc.slice(0, 600));
+      const more = desc.length > 600
+        ? `<span id="idesc-more-${appId}" style="display:none">${esc(desc.slice(600, 3000))}</span>
+           <button class="icard-desc-toggle" onclick="event.stopPropagation();_toggleDesc(${appId})">Show more</button>`
+        : '';
+      wrap.innerHTML = `
+        <div class="icard-desc-label">Job Description</div>
+        <div class="icard-desc-text" id="idesc-${appId}">${preview}${more}</div>`;
+    }
+  }
+}
+
+function _toggleDesc(id) {
+  const more = document.getElementById(`idesc-more-${id}`);
+  const btn = document.querySelector(`#idesc-${id} .icard-desc-toggle`);
+  if (!more) return;
+  const showing = more.style.display !== 'none';
+  more.style.display = showing ? 'none' : 'inline';
+  if (btn) btn.textContent = showing ? 'Show more' : 'Show less';
+}
+
+function _renderPrepContent(prep) {
+  const sections = [
+    { key: 'likely_questions',    title: 'Likely Interview Questions' },
+    { key: 'topics_to_study',     title: 'Topics to Study' },
+    { key: 'behavioral_questions',title: 'Behavioral Questions' },
+    { key: 'company_research',    title: 'Company Research' },
+    { key: 'tips',                title: 'Tips' },
+  ];
+  return sections
+    .filter(s => prep[s.key]?.length)
+    .map(s => `
+      <div class="prep-section">
+        <div class="prep-section-title">${s.title}</div>
+        <ul class="prep-list">
+          ${prep[s.key].map(item => `<li>${esc(item)}</li>`).join('')}
+        </ul>
+      </div>`)
+    .join('');
+}
+
+async function generatePrep(appId) {
+  const btn = document.getElementById(`ibtn-${appId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+
+  const prep = await apiFetch(`/interview-prep/${appId}/generate`, { method: 'POST' });
+
+  if (!prep) {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate Prep'; }
+    alert('Failed to generate prep. Make sure the job has a description saved.');
+    return;
+  }
+
+  const app = _interviewApps.find(a => a.id === appId);
+  if (app) app.prep_notes = JSON.stringify(prep);
+
+  const prepContainer = document.getElementById(`iprep-${appId}`);
+  if (prepContainer) {
+    prepContainer.innerHTML = _renderPrepContent(prep);
+    prepContainer.classList.remove('hidden');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '↺ Regenerate'; }
+}
+
+// ── Notion ─────────────────────────────────────────────────────────────────────
+
+function _notionMsg(text, color = '#adc9a0') {
+  const el = document.getElementById('notion-msg');
+  if (el) { el.textContent = text; el.style.color = color; }
+}
+
+async function loadNotionConfig() {
+  const cfg = await apiFetch('/notion/config');
+  if (!cfg) return;
+  if (cfg.api_token_set) document.getElementById('notion-token').placeholder = '••••••••••••••••••••••••••••••• (saved)';
+  document.getElementById('notion-parent-page').value = cfg.interviews_parent_page_id || '';
+  document.getElementById('notion-pages').value = (cfg.context_page_ids || []).join('\n');
+  document.getElementById('notion-enabled').checked = cfg.is_enabled;
+}
+
+async function saveNotionConfig() {
+  _notionMsg('Saving…');
+  const token = document.getElementById('notion-token').value.trim();
+  const parentPage = document.getElementById('notion-parent-page').value.trim();
+  const pagesRaw = document.getElementById('notion-pages').value;
+  const enabled = document.getElementById('notion-enabled').checked;
+
+  const contextIds = pagesRaw.split('\n').map(s => s.trim()).filter(Boolean).map(_extractNotionId);
+  const body = {
+    interviews_parent_page_id: parentPage || null,
+    context_page_ids: contextIds,
+    is_enabled: enabled,
+  };
+  if (token) body.api_token = token;
+
+  const res = await apiFetch('/notion/config', { method: 'PUT', body: JSON.stringify(body) });
+  if (res) {
+    _notionMsg('Saved!', '#3ddc6b');
+    if (token) document.getElementById('notion-token').value = '';
+    setTimeout(() => _notionMsg(''), 3000);
+  } else {
+    _notionMsg('Save failed.', '#e85a5a');
+  }
+}
+
+async function testNotionConnection() {
+  _notionMsg('Testing…');
+  const token = document.getElementById('notion-token').value.trim();
+  if (token) await saveNotionConfig();
+  const res = await apiFetch('/notion/test');
+  if (res?.ok) {
+    _notionMsg(`✓ Connected as "${res.name}"`, '#3ddc6b');
+  } else {
+    _notionMsg('✗ Connection failed — check your token and that the page is shared with your integration.', '#e85a5a');
+  }
+}
+
+async function createNotionPage(appId) {
+  const btn = document.querySelector(`#inotion-${appId} button`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+
+  const res = await apiFetch(`/notion/create-page/${appId}`, { method: 'POST' });
+
+  if (res?.notion_page_id) {
+    const app = _interviewApps.find(a => a.id === appId);
+    if (app) app.notion_page_id = res.notion_page_id;
+    const container = document.getElementById(`inotion-${appId}`);
+    if (container) {
+      const cleanId = res.notion_page_id.replace(/-/g, '');
+      container.innerHTML = `<a href="https://notion.so/${cleanId}" target="_blank" style="font-size:11px;color:#3ddc6b;text-decoration:none">↗ Open in Notion</a>`;
+    }
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = '+ Create Notion Page'; }
+    alert('Could not create Notion page. Make sure your token is saved, the integration is enabled, and the Interview Pages Parent is set in Settings → Notion.');
+  }
+}
+
+function _extractNotionId(input) {
+  if (!input) return '';
+  // Extract ID from Notion URLs: .../Page-Title-<32hexchars> or ?v=...
+  const m = input.match(/([0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12})/i)
+    || input.match(/([0-9a-f]{32})/i);
+  if (m) return m[1];
+  return input.trim();
 }

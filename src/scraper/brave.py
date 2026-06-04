@@ -21,35 +21,64 @@ HEADERS = {
 }
 
 
+_brave_failures = 0
+_BRAVE_FAILURE_LIMIT = 2
+
+
+def reset_brave_circuit():
+    global _brave_failures
+    _brave_failures = 0
+
+
 async def search_jobs(titles: list[str], locations: list[str], keywords: list[str] = None) -> list[dict]:
     """Run Brave Search queries and return raw job dicts."""
+    global _brave_failures
+
     if not BRAVE_API_KEY:
         logger.warning("BRAVE_API_KEY not set — skipping Brave search")
+        return []
+
+    if _brave_failures >= _BRAVE_FAILURE_LIMIT:
+        logger.info("Brave circuit breaker open — skipping Brave search this run")
         return []
 
     results = []
     queries = _build_queries(titles, locations, keywords or [])
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        for query in queries[:5]:  # cap at 5 queries per run to manage quota
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        for query in queries[:5]:
             try:
                 resp = await client.get(
                     BRAVE_SEARCH_URL,
                     headers=HEADERS,
-                    params={"q": query, "count": 10, "freshness": "pd"},  # pd = past day
+                    params={"q": query, "count": 10, "freshness": "pd"},
                 )
-                if resp.status_code == 429:
-                    logger.warning("Brave API rate limit hit")
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    # Redirected away from API — key is invalid or expired
+                    logger.warning(f"Brave API redirected ({resp.status_code}) — API key may be expired")
+                    _brave_failures = _BRAVE_FAILURE_LIMIT  # trip immediately
                     break
-                resp.raise_for_status()
+                if resp.status_code == 429:
+                    logger.warning("Brave API rate limited")
+                    _brave_failures += 1
+                    break
+                if not resp.is_success:
+                    _brave_failures += 1
+                    break
                 data = resp.json()
+                _brave_failures = 0  # success — reset
                 urls = [r["url"] for r in data.get("web", {}).get("results", [])]
                 for url in urls:
-                    job = await _fetch_and_parse(client, url)
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as fetch_client:
+                        job = await _fetch_and_parse(fetch_client, url)
                     if job:
                         results.append(job)
             except Exception as e:
+                _brave_failures += 1
                 logger.error(f"Brave search error for '{query}': {e}")
+                if _brave_failures >= _BRAVE_FAILURE_LIMIT:
+                    logger.warning("Brave circuit breaker tripped — skipping remaining queries")
+                    break
 
     return results
 

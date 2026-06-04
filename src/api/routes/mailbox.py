@@ -1,11 +1,23 @@
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from src.api.database import SessionLocal
 
 router = APIRouter(prefix="/mailbox", tags=["mailbox"])
+
+_VALID_CATEGORIES = {
+    "offer", "interview", "assessment", "rejection",
+    "application_confirm", "linkedin_message", "recruiter", "other",
+}
+
+
+class EventPatch(BaseModel):
+    category: Optional[str] = None
+    company_name: Optional[str] = None
 
 _CATEGORY_ICON = {
     "offer":               "🎉",
@@ -14,6 +26,7 @@ _CATEGORY_ICON = {
     "rejection":           "❌",
     "application_confirm": "✅",
     "linkedin_message":    "💬",
+    "recruiter":           "📨",
     "other":               "📧",
 }
 
@@ -131,3 +144,34 @@ def trigger_sync():
     """Manually trigger an email sync."""
     from src.email.reader import run_email_sync
     return run_email_sync()
+
+
+@router.patch("/events/{event_id}")
+def patch_event(event_id: int, body: EventPatch):
+    """Manually correct the category or company_name of an email event."""
+    if body.category and body.category not in _VALID_CATEGORIES:
+        raise HTTPException(status_code=422, detail=f"Invalid category: {body.category}")
+
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT id FROM email_events WHERE id=:id"), {"id": event_id}
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        updates = {}
+        if body.category is not None:
+            updates["category"] = body.category
+        if body.company_name is not None:
+            updates["company_name"] = body.company_name.strip() or None
+
+        if updates:
+            set_clause = ", ".join(f"{k}=:{k}" for k in updates)
+            updates["id"] = event_id
+            db.execute(text(f"UPDATE email_events SET {set_clause} WHERE id=:id"), updates)
+            db.commit()
+
+        return {"ok": True, "updated": list(updates.keys())}
+    finally:
+        db.close()

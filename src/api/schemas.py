@@ -22,6 +22,8 @@ class JobOut(BaseModel):
     is_active: bool
     user_feedback: Optional[str]
     feedback_at: Optional[datetime]
+    tags: Optional[str] = None      # JSON array e.g. '["startup","yc","w24"]'
+    already_applied: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -127,6 +129,8 @@ class ApplicationOut(BaseModel):
     applied_at: Optional[datetime]
     updated_at: datetime
     notes: Optional[str]
+    prep_notes: Optional[str] = None
+    notion_page_id: Optional[str] = None
     resume: Optional[ResumeOut]
     interviews: list[InterviewOut]
 

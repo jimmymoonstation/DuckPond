@@ -4,7 +4,9 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 logger = logging.getLogger(__name__)
-scheduler = AsyncIOScheduler()
+
+PT = "America/Los_Angeles"   # handles PST/PDT automatically
+scheduler = AsyncIOScheduler(timezone=PT)
 
 
 def start_scheduler():
@@ -51,44 +53,43 @@ def start_scheduler():
         max_instances=1,
     )
 
-    # Company auto-discovery via web search, daily at 2 AM
+    # Company auto-discovery via web search, daily at 2 AM PT
     scheduler.add_job(
         run_company_discovery,
-        trigger=CronTrigger(hour=2, minute=0),
+        trigger=CronTrigger(hour=2, minute=0, timezone=PT),
         id="company_discovery",
         replace_existing=True,
     )
 
-    # Job link validator: runs every 4 hours, 50 jobs per pass
-    # Staggered off-peak (1:00, 5:00, 9:00, 13:00, 17:00, 21:00)
+    # Job link validator: every 4 hours at staggered PT times
     scheduler.add_job(
         run_validation,
-        trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0),
+        trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0, timezone=PT),
         id="job_validator",
         replace_existing=True,
         max_instances=1,
     )
 
-    # Morning summary at 9:00 AM daily
+    # Morning summary at 9:00 AM PT
     scheduler.add_job(
         send_morning_summary,
-        trigger=CronTrigger(hour=9, minute=0),
+        trigger=CronTrigger(hour=9, minute=0, timezone=PT),
         id="morning_summary",
         replace_existing=True,
     )
 
-    # Evening check-in at 6:00 PM daily
+    # Evening check-in at 6:00 PM PT
     scheduler.add_job(
         send_evening_checkin,
-        trigger=CronTrigger(hour=18, minute=0),
+        trigger=CronTrigger(hour=18, minute=0, timezone=PT),
         id="evening_checkin",
         replace_existing=True,
     )
 
-    # Daily report at 9:00 PM: jobs found today + call to action
+    # Daily report at 9:00 PM PT
     scheduler.add_job(
         send_daily_report,
-        trigger=CronTrigger(hour=21, minute=0),
+        trigger=CronTrigger(hour=21, minute=0, timezone=PT),
         id="daily_report",
         replace_existing=True,
     )

@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ class CompanyOut(BaseModel):
     career_url: Optional[str]
     discovered_from: str
     is_active: bool
+    added_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -92,6 +94,51 @@ def delete_company(company_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Company not found")
     db.delete(company)
     db.commit()
+
+
+@router.get("/names")
+def list_tracked_names(db: Session = Depends(get_db)):
+    """Return all active tracked company names + career_url for the dashboard link check."""
+    rows = db.query(TrackedCompany.company_name, TrackedCompany.career_url)\
+             .filter_by(is_active=True).all()
+    return {r.company_name.lower(): r.career_url for r in rows}
+
+
+class AutoDiscoverBody(BaseModel):
+    company_name: str
+
+
+@router.post("/auto-discover")
+async def auto_discover(body: AutoDiscoverBody, db: Session = Depends(get_db)):
+    """
+    Try to find a company's ATS and add them to tracked_companies.
+    Used by My Shots when the company isn't already tracked.
+    """
+    name = body.company_name.strip()
+    if not name:
+        raise HTTPException(400, "company_name required")
+
+    # Already tracked?
+    existing = (
+        db.query(TrackedCompany)
+        .filter(TrackedCompany.company_name.ilike(name), TrackedCompany.is_active == True)
+        .first()
+    )
+    if existing:
+        return {"status": "exists", "company": CompanyOut.model_validate(existing).model_dump()}
+
+    probe = await _auto_probe(name)
+    if not probe:
+        return {"status": "not_found", "message": f"Could not find {name} on any known ATS. Try adding manually via the Companies tab."}
+
+    ats_type, slug = probe["ats_type"], probe["ats_slug"]
+    existing2 = db.query(TrackedCompany).filter_by(ats_type=ats_type, ats_slug=slug).first()
+    if existing2:
+        return {"status": "exists", "company": CompanyOut.model_validate(existing2).model_dump()}
+
+    company = _save_company(db, name.title(), probe)
+    return {"status": "added", "company": CompanyOut.model_validate(company).model_dump(),
+            "message": f"Added {company.company_name} via {ats_type} — {probe.get('job_count','?')} jobs found."}
 
 
 # ── Company Portal (smart ingest) ─────────────────────────────────────────────

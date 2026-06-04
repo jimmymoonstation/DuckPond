@@ -177,6 +177,7 @@ tbody td { padding: 11px 14px; vertical-align: middle; font-size: 13px; }
 .badge-teal   { background: #061e1e; color: #22d3ee; }
 .badge-yellow { background: #1e1a00; color: var(--yellow); }
 .badge-gray   { background: var(--surface2); color: var(--text-dim); }
+.badge-yc     { background: #2a1400; color: #f97316; border: 1px solid #7c2d0040; font-size: 10px; padding: 1px 5px; margin-left: 4px; }
 
 /* ── Companies table ── */
 .btn-tiny { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: none; cursor: pointer; font-weight: 600; }
@@ -393,6 +394,30 @@ th.sort-active .sort-arrow { color: var(--accent); }
 }
 .mcard-sm-num   { font-size: 20px; font-weight: 700; }
 .mcard-sm-label { font-size: 12px; color: var(--text-dim); }
+
+/* ── Mailbox inline edit ── */
+.mailbox-company-cell, .mailbox-cat-cell { cursor: pointer; position: relative; }
+.mailbox-company-cell .edit-hint, .mailbox-cat-cell .edit-hint {
+  opacity: 0; font-size: 10px; color: var(--text-dim);
+  margin-left: 5px; transition: opacity 0.15s;
+}
+.mailbox-company-cell:hover .edit-hint,
+.mailbox-cat-cell:hover .edit-hint { opacity: 1; }
+
+/* ── My Shots company link status ── */
+.company-tracked {
+  color: var(--accent); font-weight: 500; text-decoration: none;
+}
+a.company-tracked:hover { text-decoration: underline; }
+.company-untracked {
+  color: var(--orange); font-weight: 500;
+}
+.btn-discover {
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; margin-left: 4px; padding: 0 3px;
+  opacity: 0.7; vertical-align: middle;
+}
+.btn-discover:hover { opacity: 1; }
 
 /* ── Company Portal ── */
 .portal-wrap {

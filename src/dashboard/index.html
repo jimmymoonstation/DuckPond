@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Duck Hunt</title>
+  <title>DuckPond</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="icon" type="image/png" href="favicon.png" />
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=7" />
   <script src="chart.umd.min.js"></script>
   <style>
     /* === CRITICAL LAYOUT — body is the flex row container === */
@@ -135,6 +135,30 @@
       from { filter: drop-shadow(0 0 4px #f5c842) drop-shadow(0 0 8px #f59e0b); transform: scale(1); }
       to   { filter: drop-shadow(0 0 8px #ffe566) drop-shadow(0 0 16px #f5c842); transform: scale(1.15); }
     }
+
+    /* ── Interview prep cards ── */
+    .interview-card { background: #0e1f12; border: 1px solid #1c3020; border-radius: 10px; margin-bottom: 10px; overflow: hidden; transition: border-color 0.15s; }
+    .interview-card:hover { border-color: #2a4030; }
+    .icard-header { display: flex; align-items: center; gap: 10px; padding: 13px 16px; user-select: none; cursor: pointer; }
+    .icard-header:hover { background: rgba(255,255,255,0.02); }
+    .icard-info { flex: 1; min-width: 0; }
+    .icard-status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+    .icard-body { border-top: 1px solid #1c3020; padding: 16px 18px 18px; }
+    .icard-body.hidden { display: none; }
+    .icard-desc { margin-bottom: 14px; }
+    .icard-desc-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #628a6a; margin-bottom: 6px; }
+    .icard-desc-text { font-size: 12px; color: #9ab89a; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+    .icard-desc-toggle { background: none; border: none; color: #3ddc6b; font-size: 11px; cursor: pointer; padding: 5px 0 0; display: block; }
+    .inotion-link { font-size: 11px; color: #3ddc6b; text-decoration: none; }
+    .inotion-link:hover { text-decoration: underline; }
+    .inotion-create { font-size: 11px !important; padding: 2px 7px !important; }
+    .icard-prep { margin-top: 16px; padding-top: 14px; border-top: 1px solid #1c3020; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .icard-prep.hidden { display: none; }
+    .prep-section { background: #0a1a0d; border: 1px solid #1c3020; border-radius: 8px; padding: 12px 14px; }
+    .prep-section-title { font-size: 10px; font-weight: 700; color: #3ddc6b; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 9px; }
+    .prep-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+    .prep-list li { font-size: 12px; color: #c5ddc0; line-height: 1.5; padding-left: 12px; position: relative; }
+    .prep-list li::before { content: '›'; position: absolute; left: 0; color: #3ddc6b; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -162,7 +186,7 @@
         </svg>
       </div>
       <div class="brand-text">
-        <div class="brand-name">Duck Hunt</div>
+        <div class="brand-name">DuckPond</div>
         <div class="brand-sub">job search tracker</div>
       </div>
     </div>
@@ -187,6 +211,10 @@
       <button class="tab" data-tab="analysis">
         <svg class="tab-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="1,12 5,7 9,10 15,3"/></svg>
         Analysis
+      </button>
+      <button class="tab" data-tab="interviews">
+        <svg class="tab-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="6" cy="5" r="3"/><path d="M1 15c0-2.8 2.2-5 5-5"/><path d="M11 10l1.5 2 3-3"/></svg>
+        Interviews
       </button>
       <div class="nav-divider"></div>
       <button class="tab" data-tab="resumes">
@@ -257,7 +285,8 @@
   <!-- Application Tracker -->
   <section id="tab-tracker" class="tab-content">
     <div class="toolbar">
-      <select id="filter-status">
+      <input id="apps-search" type="text" placeholder="Search title or company…" style="flex:1;min-width:180px" oninput="_renderAppsTable()" />
+      <select id="filter-status" onchange="loadApplications()">
         <option value="">All Statuses</option>
         <option value="saved">Saved</option>
         <option value="applied">Applied</option>
@@ -289,7 +318,7 @@
   <section id="tab-config" class="tab-content">
     <div class="config-form">
       <h2>Hunt Settings</h2>
-      <p>Tell Duck Hunt what to look for. Separate multiple values with commas.</p>
+      <p>Tell DuckPond what to look for. Separate multiple values with commas.</p>
 
       <label>Job Titles <small>(e.g. Data Engineer, Analytics Engineer)</small></label>
       <input id="cfg-titles" type="text" placeholder="Data Engineer, Analytics Engineer" />
@@ -308,6 +337,40 @@
 
       <button id="btn-save-config" class="btn-primary">Save & Start Hunting</button>
       <span id="config-msg"></span>
+
+      <hr style="border:none;border-top:1px solid #1c3020;margin:28px 0" />
+
+      <h2>Notion Integration</h2>
+      <p>DuckPond creates a dedicated Notion page for each interview — pre-filled with the job description and a structured prep template. When you click <em>Generate Prep</em>, the AI output is written directly into that page. Your notes stay yours; DuckPond reads them back as context for smarter suggestions.</p>
+      <p style="font-size:11px;color:#628a6a;margin-top:8px;line-height:1.7">
+        <strong style="color:#adc9a0">Setup:</strong>
+        1. Go to <a href="https://www.notion.so/my-integrations" target="_blank" style="color:#3ddc6b">notion.so/my-integrations</a> → New Integration → copy the <strong>Internal Integration Secret</strong> (starts with <code>secret_</code>).<br>
+        2. In Notion, create a page like <em>"Interview Prep"</em> — this is where all your interview sub-pages will live.<br>
+        3. Share that page with your integration: open it → <strong>···</strong> → Connections → add your integration.<br>
+        4. Paste the page URL below and save.
+      </p>
+
+      <label>API Token <small>(secret_… — only needed once, stored on your server)</small></label>
+      <input id="notion-token" type="password" placeholder="secret_xxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+
+      <label>Interview Pages Parent <small>(URL or ID of the Notion page where interview sub-pages will be created)</small></label>
+      <input id="notion-parent-page" type="text" placeholder="https://notion.so/… or paste the page ID" />
+
+      <label>Extra Context Pages <small>(optional — your background notes, career goals, research; one URL or ID per line)</small></label>
+      <textarea id="notion-pages" rows="3" placeholder="https://notion.so/… (optional)"></textarea>
+
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;font-size:13px;font-weight:500;cursor:pointer">
+          <input id="notion-enabled" type="checkbox" />
+          Enable — auto-create pages &amp; sync AI prep to Notion
+        </label>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
+        <button id="btn-save-notion" class="btn-primary">Save Notion Settings</button>
+        <button id="btn-test-notion" class="btn-secondary">Test Connection</button>
+      </div>
+      <span id="notion-msg" style="font-size:12px;margin-top:8px;display:block"></span>
     </div>
   </section>
 
@@ -364,17 +427,19 @@
     </div>
     <table id="companies-table">
       <thead>
-        <tr>
-          <th>Company</th>
-          <th>ATS</th>
+        <tr id="companies-thead">
+          <th class="sortable" onclick="companiesSort('company_name')">Company <span class="sort-arrow">⇅</span></th>
+          <th class="sortable" onclick="companiesSort('ats_type')">ATS <span class="sort-arrow">⇅</span></th>
           <th>Slug / Tenant</th>
           <th>Career Page</th>
+          <th>Source</th>
+          <th class="sortable sort-active" onclick="companiesSort('added_at')">Added <span class="sort-arrow">▼</span></th>
           <th>Active</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody id="companies-body">
-        <tr><td colspan="6" class="loading">Loading…</td></tr>
+        <tr><td colspan="8" class="loading">Loading…</td></tr>
       </tbody>
     </table>
   </section>
@@ -427,6 +492,20 @@
 
     <!-- Recent activity -->
     <div style="margin:20px 0 8px;font-size:13px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.05em">Recent Activity</div>
+    <div class="toolbar">
+      <input id="mailbox-search" type="text" placeholder="Search company or subject…" oninput="renderMailboxTable()" style="flex:1;min-width:180px" />
+      <select id="mailbox-filter-cat" onchange="renderMailboxTable()">
+        <option value="">All Categories</option>
+        <option value="interview">Interview</option>
+        <option value="offer">Offer</option>
+        <option value="assessment">Assessment</option>
+        <option value="rejection">Rejection</option>
+        <option value="application_confirm">Confirmation</option>
+        <option value="recruiter">Recruiter</option>
+        <option value="linkedin_message">LinkedIn DM</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
     <table class="co-table">
       <thead><tr id="mailbox-thead">
         <th style="width:36px"></th>
@@ -499,6 +578,20 @@
       <div class="an-chart-wrap" style="height:300px"><canvas id="chart-companies"></canvas></div>
     </div>
 
+  </section>
+
+  <!-- Interviews Tab -->
+  <section id="tab-interviews" class="tab-content">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <h2 style="font-size:16px;font-weight:700;color:#dff0d4">Interview Prep</h2>
+        <p style="font-size:12px;color:#628a6a;margin-top:3px">AI-generated prep based on your job descriptions — phone screens, interviews, and offers</p>
+      </div>
+      <button class="btn-secondary btn-sm" onclick="loadInterviewPrep()">Refresh</button>
+    </div>
+    <div id="interviews-list">
+      <div style="padding:60px;text-align:center;color:#628a6a">Loading…</div>
+    </div>
   </section>
 
   </div><!-- /content-scroll -->
@@ -642,6 +735,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>

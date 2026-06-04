@@ -500,29 +500,34 @@ async def _scrape_lever(client, company, titles, locations, levels):
 
 async def _scrape_ashby(client, company, titles, locations, levels):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{company}"
-    resp = await client.get(url)
-    if resp.status_code in (404, 422):
+    try:
+        resp = await client.get(url, timeout=10)
+    except Exception:
         return []
-    resp.raise_for_status()
-    data = resp.json()
+    if resp.status_code in (401, 403, 404, 422):
+        return []
+    try:
+        data = resp.json()
+    except Exception:
+        return []
 
     results = []
-    for job in data.get("jobPostings", []):
+    for job in data.get("jobs", []):          # key is "jobs", not "jobPostings"
         if not job.get("isListed", True):
             continue
-        loc = job.get("locationName", "") or ""
+        loc = job.get("location", "") or ""
         if not _matches_criteria(job.get("title", ""), loc, titles, locations, levels):
             continue
         results.append({
             "company_job_id": job["id"],
-            "company_name": data.get("organizationName", company.title()),
-            "job_title": job["title"],
-            "location": loc or None,
-            "level": _infer_level(job["title"]),
-            "url": job["jobUrl"],
-            "source": f"ashby:{company}",
-            "description": _strip_html(job.get("descriptionHtml", ""))[:2000],
-            "posted_at": _parse_iso(job.get("publishedDate")),
+            "company_name":   company.replace("-", " ").title(),
+            "job_title":      job["title"],
+            "location":       loc or None,
+            "level":          _infer_level(job["title"]),
+            "url":            job.get("jobUrl", f"https://jobs.ashbyhq.com/{company}/{job['id']}"),
+            "source":         f"ashby:{company}",
+            "description":    job.get("descriptionPlain", "")[:2000] or None,
+            "posted_at":      _parse_iso(job.get("publishedAt")),
         })
     return results
 
@@ -621,6 +626,55 @@ async def _fetch_linkedin_apply_url(client, job_id: str, headers: dict) -> Optio
     return None
 
 
+_ATS_BOARD_TEMPLATES = {
+    "greenhouse":      "https://job-boards.greenhouse.io/{slug}",
+    "lever":           "https://jobs.lever.co/{slug}",
+    "ashby":           "https://jobs.ashbyhq.com/{slug}",
+    "workday":         "https://{slug}.myworkdayjobs.com",
+    "smartrecruiters": "https://jobs.smartrecruiters.com/{slug}",
+}
+
+
+def _resolve_ats_url_from_tracked(company_name: str, tracked: dict) -> str | None:
+    """
+    Given a company name from a LinkedIn result, return the career page URL
+    from tracked_companies if we already track this company — no HTTP needed.
+    """
+    key = company_name.lower().strip()
+    # Exact match first
+    if key in tracked:
+        entry = tracked[key]
+        return entry.get("career_url") or _ATS_BOARD_TEMPLATES.get(
+            entry["ats_type"], ""
+        ).format(slug=entry["ats_slug"])
+    # Partial match (e.g. "Adobe" in "Adobe Inc.")
+    for tk, entry in tracked.items():
+        if tk in key or key in tk:
+            return entry.get("career_url") or _ATS_BOARD_TEMPLATES.get(
+                entry["ats_type"], ""
+            ).format(slug=entry["ats_slug"])
+    return None
+
+
+def _load_tracked_companies_cache() -> dict:
+    """Load active tracked companies keyed by lowercase company_name."""
+    try:
+        from src.api.database import SessionLocal
+        from src.api.models import TrackedCompany
+        with SessionLocal() as db:
+            rows = db.query(TrackedCompany).filter_by(is_active=True).all()
+            return {
+                r.company_name.lower().strip(): {
+                    "ats_type":  r.ats_type,
+                    "ats_slug":  r.ats_slug,
+                    "career_url": r.career_url,
+                }
+                for r in rows
+            }
+    except Exception:
+        return {}
+
+
 async def _scrape_linkedin(
     client,
     titles: list[str],
@@ -646,7 +700,8 @@ async def _scrape_linkedin(
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ]
     import random as _random
-    detail_fetches = 0  # cap detail page calls per run
+    detail_fetches = 0  # cap detail page calls per run (for companies not in tracked_companies)
+    _tracked_companies_cache = _load_tracked_companies_cache()
 
     for i, title_kw in enumerate(titles or []):
         # Polite delay between keyword requests to avoid 429
@@ -725,12 +780,23 @@ async def _scrape_linkedin(
                 m = re.search(r"/jobs/view/(\d+)", job_url)
                 job_id = m.group(1) if m else job_url[-20:]
 
-                # Fetch the detail page to capture the company's own apply URL (capped per run)
-                original_url = None
-                if detail_fetches < 5:
-                    await _asyncio.sleep(1)
-                    original_url = await _fetch_linkedin_apply_url(client, job_id, headers)
+                # Resolve real ATS URL so cross-source dedup works.
+                # 1. Check tracked_companies for a known ATS URL (instant, no HTTP).
+                # 2. Fall back to fetching the LinkedIn detail page (capped).
+                ats_url = _resolve_ats_url_from_tracked(company, _tracked_companies_cache)
+                if not ats_url and detail_fetches < 30:
+                    await _asyncio.sleep(0.8)
+                    ats_url = await _fetch_linkedin_apply_url(client, job_id, headers)
                     detail_fetches += 1
+
+                # Use ATS URL as primary so dedup works cross-source.
+                # Keep LinkedIn URL as original_url for reference.
+                if ats_url:
+                    primary_url  = ats_url
+                    linkedin_ref = job_url
+                else:
+                    primary_url  = job_url
+                    linkedin_ref = None
 
                 results.append({
                     "company_job_id": f"li_{job_id}",
@@ -738,8 +804,8 @@ async def _scrape_linkedin(
                     "job_title": title,
                     "location": loc or None,
                     "level": _infer_level(title),
-                    "url": job_url,
-                    "original_url": original_url,
+                    "url": primary_url,
+                    "original_url": linkedin_ref,
                     "source": "linkedin",
                     "description": None,
                     "posted_at": posted_at,
@@ -1248,11 +1314,29 @@ def _matches_criteria(title: str, location: str, titles: list[str],
         return False
 
     if levels:
+        user_levels_lower = [l.lower() for l in levels]
         inferred = _infer_level(title)
+
         if inferred is not None:
-            user_levels_lower = [l.lower() for l in levels]
+            # Inferred level must be in the allowed list
             if inferred.lower() not in user_levels_lower:
                 return False
+        else:
+            # No level keyword in title — if user only wants junior/new-grad,
+            # still block titles that have senior-indicator words
+            _SENIOR_WORDS = [
+                "senior", "sr.", r"\bsr\b", "staff", "principal",
+                "distinguished", "lead", "manager", "director",
+                "head of", r"\bvp\b", "vice president", "chief",
+            ]
+            wants_only_junior = all(
+                l in ("junior", "new grad", "entry level", "intern", "associate")
+                for l in user_levels_lower
+            )
+            if wants_only_junior:
+                t_lower = title.lower()
+                if any(re.search(p, t_lower) for p in _SENIOR_WORDS):
+                    return False
 
     return True
 

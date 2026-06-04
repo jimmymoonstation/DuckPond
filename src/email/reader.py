@@ -13,21 +13,28 @@ from email.utils import parseaddr, parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
 
+# Priority order for app.status field values (higher = further in pipeline)
 _STATUS_PRIORITY = {
-    "application_confirm": 1,
-    "assessment": 2,
-    "interview": 3,
-    "offer": 4,
-    "rejection": 5,
+    "saved":        0,
+    "applied":      1,
+    "phone_screen": 2,
+    "interview":    3,
+    "offer":        4,
+    "rejected":     5,
+    "withdrawn":    5,
 }
 
 _CATEGORY_TO_STATUS = {
     "application_confirm": "applied",
-    "assessment":          "assessment",
     "interview":           "interview",
-    "offer":               "offered",
+    "offer":               "offer",
+    # rejection: only auto-update when company match is high-confidence (not body-only)
     "rejection":           "rejected",
+    # recruiter: no status change — just informational
 }
+
+# Categories that should NOT auto-update application status from a body-only company match
+_REQUIRES_CONFIDENT_MATCH = {"rejection"}
 
 
 def _decode_str(value: str | bytes | None) -> str:
@@ -100,11 +107,23 @@ def run_email_sync() -> dict:
             db.execute(text("SELECT message_id FROM email_events")).fetchall()
         }
 
-        # ── Known company names for extraction ──────────────────────────────
-        known_companies = [
-            c.company_name for c in
-            db.query(TrackedCompany).filter_by(is_active=True).all()
-        ]
+        # ── Known company names + domains for extraction ─────────────────────
+        all_tracked = db.query(TrackedCompany).filter_by(is_active=True).all()
+        known_companies = [c.company_name for c in all_tracked]
+
+        # Build set of employer domains: "stripe.com", "databricks.com", etc.
+        # Used to decide whether to save "other" category emails
+        tracked_domains: set[str] = set()
+        for tc in all_tracked:
+            slug = tc.ats_slug.lower().replace("-", "").replace("_", "")
+            tracked_domains.add(slug + ".com")
+            tracked_domains.add(slug + ".ai")
+            tracked_domains.add(slug + ".io")
+            if tc.career_url:
+                import re as _re
+                m = _re.search(r'https?://(?:www\.|jobs\.)?([^/]+)', tc.career_url)
+                if m:
+                    tracked_domains.add(m.group(1).lower())
 
         # ── IMAP connect ─────────────────────────────────────────────────────
         mail = imaplib.IMAP4_SSL(HOST, PORT)
@@ -143,22 +162,32 @@ def run_email_sync() -> dict:
                 body = _get_body(msg)
                 category = classify(subject, body, from_addr)
 
-                # Skip totally unrelated emails early
                 if category == "other":
-                    # Still skip — only save classified emails
-                    seen_ids.add(msg_id)
-                    continue
+                    # Save if sender is from a tracked company domain —
+                    # this catches recruiter follow-ups that don't hit keywords
+                    sender_domain = from_addr.split("@")[-1].lower() if "@" in from_addr else ""
+                    sender_base   = sender_domain.replace("www.", "")
+                    is_employer_sender = (
+                        sender_base in tracked_domains
+                        or any(sender_base.endswith("." + d) for d in tracked_domains)
+                        or sender_domain in _JOB_SENDER_DOMAINS
+                    )
+                    if not is_employer_sender:
+                        seen_ids.add(msg_id)
+                        continue
+                    # Falls through with category="other" — saved but no status update
 
                 # LinkedIn message notifications get special extraction
                 if category == "linkedin_message":
                     from src.email.classifier import extract_linkedin_sender, extract_linkedin_preview
-                    sender_name = extract_linkedin_sender(subject) or from_name
-                    preview     = extract_linkedin_preview(body)
-                    company     = sender_name
-                    job_title   = None
-                    snippet     = re.sub(r'\s+', ' ', preview).strip()[:250]
+                    sender_name  = extract_linkedin_sender(subject) or from_name
+                    preview      = extract_linkedin_preview(body)
+                    company      = sender_name
+                    company_src  = "sender_domain"
+                    job_title    = None
+                    snippet      = re.sub(r'\s+', ' ', preview).strip()[:250]
                 else:
-                    company   = extract_company(subject, body, from_addr, known_companies)
+                    company, company_src = extract_company(subject, body, from_addr, known_companies)
                     job_title = extract_job_title(subject, body)
                     snippet   = re.sub(r'\s+', ' ', body).strip()[:250]
 
@@ -167,7 +196,17 @@ def run_email_sync() -> dict:
                 if category == "linkedin_message":
                     pass  # LinkedIn messages are not tied to applications
                 elif company:
-                    # Find applications for this company, pick best match
+                    # Don't link/update status for low-confidence (body-only) matches
+                    # on sensitive categories like rejection — this prevents wrong companies
+                    # from being linked when company name only appears in email boilerplate
+                    if company_src == "body_known" and category in _REQUIRES_CONFIDENT_MATCH:
+                        logger.info(
+                            f"Skipping low-confidence rejection link: company='{company}' "
+                            f"found only in body, subject='{subject[:60]}'"
+                        )
+                        company = None  # don't link, store event with no company
+
+                if company:
                     apps = (
                         db.query(Application)
                         .join(Job, Application.job_id == Job.id)
@@ -175,22 +214,30 @@ def run_email_sync() -> dict:
                         .all()
                     )
                     if apps:
-                        # Prefer the most recent application
                         linked_app_id = apps[-1].id
 
-                        # Update status if this email implies a higher-priority state
                         new_status = _CATEGORY_TO_STATUS.get(category)
                         if new_status:
                             app = apps[-1]
                             current_priority = _STATUS_PRIORITY.get(app.status, 0)
-                            new_priority     = _STATUS_PRIORITY.get(category, 0)
-                            if new_priority > current_priority:
+                            new_priority     = _STATUS_PRIORITY.get(new_status, 0)
+                            # Only advance forward in the pipeline, never go backward
+                            # Exception: rejection can always set rejected (terminal state)
+                            if new_status == "rejected" or new_priority > current_priority:
                                 app.status = new_status
                                 summary["status_updates"] += 1
                                 logger.info(
                                     f"Updated {company} application → {new_status} "
                                     f"(via email: {subject[:60]})"
                                 )
+
+                        # Write timeline event for interview invitations detected by email
+                        if category == "interview":
+                            from src.api.routes.applications import _write_timeline_event
+                            _write_timeline_event(
+                                db, app, "interview_invited",
+                                notes=subject[:200], source="email",
+                            )
 
                 # ── Save event ───────────────────────────────────────────────
                 db.execute(text("""

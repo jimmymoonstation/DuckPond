@@ -94,59 +94,104 @@ async def _scrape_wellfound(client, titles: list[str], locations: list[str], lev
 
 async def _scrape_yc(client, titles: list[str], locations: list[str], levels: list[str]) -> list[dict]:
     """
-    Search Y Combinator Work at a Startup jobs via DDG site: queries.
-    The site uses client-side rendering without exposed SSR data,
-    so we use DuckDuckGo to find indexed job pages.
+    Y Combinator Work at a Startup — direct JSON API.
+    Endpoint: https://www.workatastartup.com/jobs/search?q=QUERY
+    Returns structured data including YC batch, company, salary, location.
     """
     from src.scraper.career_pages import _matches_criteria, _infer_level
-    from src.scraper.web_search import _clean_title, _title_from_url, _is_individual_job_url
     import asyncio
+
+    # Location keywords accepted by the WAAS search
+    _US_LOC_TERMS = {"san francisco", "bay area", "new york", "seattle",
+                     "los angeles", "austin", "boston", "chicago", "remote"}
 
     results = []
     seen: set[str] = set()
-    loc_kw = '"San Francisco" OR "Bay Area" OR "Remote"'
 
     for title_kw in (titles or [])[:4]:
-        query = f'"{title_kw}" {loc_kw} site:workatastartup.com'
-        raw = await asyncio.get_event_loop().run_in_executor(None, _ddg, query, 15)
+        try:
+            resp = await client.get(
+                "https://www.workatastartup.com/jobs/search",
+                params={"q": title_kw, "jobType": "fulltime"},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                },
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"YC API {resp.status_code} for '{title_kw}'")
+                continue
+            jobs = resp.json().get("jobs", [])
+        except Exception as e:
+            logger.warning(f"YC API error: {e}")
+            continue
+
         await asyncio.sleep(1)
 
-        for r in raw:
-            url  = r.get("href", "")
-            snip = r.get("body", "")
+        for job in jobs:
+            job_id   = str(job.get("id", ""))
+            title    = (job.get("title") or "").strip()
+            company  = (job.get("companyName") or "").strip()
+            loc_raw  = (job.get("location") or "").strip()
+            batch    = (job.get("companyBatch") or "").strip()      # "W24", "S21", etc.
+            one_liner = (job.get("companyOneLiner") or "").strip()
+            salary   = job.get("salary") or ""
+            slug     = job.get("companySlug", "")
 
-            if not url or "workatastartup.com" not in url:
+            if not title or not company or not job_id:
                 continue
-            # YC job URLs look like /jobs/{id} or /companies/{slug}/jobs/{id}
-            if "/jobs/" not in url:
-                continue
+
+            url = f"https://www.workatastartup.com/jobs/{job_id}"
             if url in seen:
                 continue
             seen.add(url)
 
-            title    = _title_from_url(url) or _clean_title(r.get("title", ""))
-            m = re.search(r"workatastartup\.com/companies/([^/?#]+)", url)
-            company  = m.group(1).replace("-", " ").title() if m else ""
-            location = ""
-            if "remote" in snip.lower():
-                location = "Remote"
-            elif "san francisco" in snip.lower() or "bay area" in snip.lower():
-                location = "San Francisco Bay Area"
-
-            if not title or not _matches_criteria(title, location or snip, titles, locations, levels):
+            # Location filter — keep US/Remote only
+            loc_lower = loc_raw.lower()
+            is_us_or_remote = (
+                "remote" in loc_lower
+                or any(t in loc_lower for t in _US_LOC_TERMS)
+                or loc_lower in {"us", "united states"}
+                or loc_lower == ""
+            )
+            if not is_us_or_remote:
                 continue
 
+            # Title / criteria filter
+            if not _matches_criteria(title, loc_raw, titles, locations, levels):
+                continue
+
+            # Build description with YC metadata
+            desc_parts = []
+            if batch:
+                desc_parts.append(f"YC {batch}")
+            if one_liner:
+                desc_parts.append(one_liner)
+            if salary:
+                desc_parts.append(f"Salary: {salary}")
+            description = " · ".join(desc_parts) if desc_parts else None
+
+            # tags: "yc" + batch if available
+            tags_list = ["startup", "yc"]
+            if batch:
+                tags_list.append(batch.lower())
+            import json as _json
+            tags = _json.dumps(tags_list)
+
             results.append({
-                "company_job_id": _job_id(url),
-                "company_name":   company or "Unknown",
+                "company_job_id": f"yc_{job_id}",
+                "company_name":   company,
                 "job_title":      title,
-                "location":       location or None,
+                "location":       loc_raw or None,
                 "level":          _infer_level(title),
                 "url":            url,
                 "source":         "yc",
-                "description":    snip[:500] or None,
+                "description":    description,
                 "posted_at":      None,
+                "tags":           tags,
             })
 
-    logger.info(f"YC Work at a Startup (DDG): {len(results)} matching jobs")
+    logger.info(f"YC Work at a Startup (API): {len(results)} matching jobs")
     return results
