@@ -81,10 +81,23 @@ def _migrate_db():
                 quota_limit      INTEGER DEFAULT 0,
                 quota_remaining  INTEGER DEFAULT 0,
                 bandwidth_bytes  INTEGER DEFAULT 0,
+                tokens_in        INTEGER DEFAULT 0,
+                tokens_out       INTEGER DEFAULT 0,
+                cost_usd         REAL DEFAULT 0,
                 updated_at       TEXT
             )
         """))
         conn.commit()
+
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(api_quota)"))}
+        for col, ddl in [
+            ("tokens_in",   "ALTER TABLE api_quota ADD COLUMN tokens_in INTEGER DEFAULT 0"),
+            ("tokens_out",  "ALTER TABLE api_quota ADD COLUMN tokens_out INTEGER DEFAULT 0"),
+            ("cost_usd",    "ALTER TABLE api_quota ADD COLUMN cost_usd REAL DEFAULT 0"),
+        ]:
+            if col not in existing:
+                conn.execute(text(ddl))
+                conn.commit()
 
         # Seed a single NotionConfig row if the table is empty
     with engine.connect() as conn:

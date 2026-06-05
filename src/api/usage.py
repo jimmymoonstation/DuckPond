@@ -143,26 +143,29 @@ def fetch_anthropic_live() -> dict | None:
         total_out = sum(b.get("output_tokens", 0) for b in buckets)
         total_calls = sum(b.get("request_count", 0) for b in buckets)
 
+        cost = round(
+            total_in / 1_000_000 * CLAUDE_HAIKU_INPUT_COST_PER_M +
+            total_out / 1_000_000 * CLAUDE_HAIKU_OUTPUT_COST_PER_M, 4
+        )
+
         # Cache in api_quota table
         from src.api.database import SessionLocal
         from sqlalchemy import text
         with SessionLocal() as db:
             db.execute(text("""
-                INSERT INTO api_quota (service, quota_used, updated_at)
-                VALUES ('claude', :calls, :ts)
+                INSERT INTO api_quota (service, quota_used, tokens_in, tokens_out, cost_usd, updated_at)
+                VALUES ('claude', :calls, :tin, :tout, :cost, :ts)
                 ON CONFLICT(service) DO UPDATE SET
                     quota_used = excluded.quota_used,
+                    tokens_in  = excluded.tokens_in,
+                    tokens_out = excluded.tokens_out,
+                    cost_usd   = excluded.cost_usd,
                     updated_at = excluded.updated_at
-            """), {"calls": total_calls, "ts": now.isoformat()})
+            """), {
+                "calls": total_calls, "tin": total_in, "tout": total_out,
+                "cost": cost, "ts": now.isoformat(),
+            })
             db.commit()
-        return {
-            "calls": total_calls,
-            "tokens_in": total_in,
-            "tokens_out": total_out,
-            "cost_usd": round(
-                total_in / 1_000_000 * CLAUDE_HAIKU_INPUT_COST_PER_M +
-                total_out / 1_000_000 * CLAUDE_HAIKU_OUTPUT_COST_PER_M, 4
-            ),
-        }
+        return {"calls": total_calls, "tokens_in": total_in, "tokens_out": total_out, "cost_usd": cost}
     except Exception:
         return None

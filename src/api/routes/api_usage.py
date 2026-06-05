@@ -36,7 +36,8 @@ def get_usage():
 
         # Cached quota data (from response headers / last live fetch)
         quota_rows = db.execute(text("""
-            SELECT service, quota_used, quota_limit, quota_remaining, bandwidth_bytes, updated_at
+            SELECT service, quota_used, quota_limit, quota_remaining,
+                   bandwidth_bytes, tokens_in, tokens_out, cost_usd, updated_at
             FROM api_quota
         """)).fetchall()
 
@@ -92,7 +93,8 @@ def get_usage():
     # Cached quota from api_quota (Brave from response headers, others from last live fetch)
     quota = {r[0]: {
         "quota_used": r[1], "quota_limit": r[2], "quota_remaining": r[3],
-        "bandwidth_bytes": r[4], "updated_at": r[5],
+        "bandwidth_bytes": r[4], "tokens_in": r[5], "tokens_out": r[6],
+        "cost_usd": r[7], "updated_at": r[8],
     } for r in quota_rows}
 
     brave_quota = quota.get("brave", {})
