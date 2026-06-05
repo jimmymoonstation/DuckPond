@@ -1586,10 +1586,11 @@ function _toggleInterviewCard(id) {
 function _renderInterviewRounds(a) {
   const rounds = a.interviews || [];
   const rows = rounds.map(iv => {
-    const d = iv.scheduled_at ? new Date(iv.scheduled_at) : null;
+    const d = iv.scheduled_at ? new Date(iv.scheduled_at + 'Z') : null;
+    const PT = {timeZone: 'America/Los_Angeles'};
     const dateStr = d
-      ? d.toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric'})
-        + (d.getHours() ? ' at ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '')
+      ? d.toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',...PT})
+        + (d.getUTCHours() || d.getUTCMinutes() ? ' at ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',...PT}) : '')
       : '—';
     const isPast = d && d < new Date();
     const outcomeColor = iv.outcome === 'pass' ? '#69db7c' : iv.outcome === 'fail' ? '#e85a5a' : '#628a6a';
@@ -1667,8 +1668,9 @@ function _renderInterviewCard(a) {
           <div style="display:flex;align-items:center;gap:12px;margin-top:4px;flex-wrap:wrap">
             ${a.applied_at ? `<span style="font-size:11px;color:#628a6a">Applied ${formatDate(a.applied_at)}</span>` : ''}
             ${(a.interviews || []).map(iv => {
-              const d = iv.scheduled_at ? new Date(iv.scheduled_at) : null;
-              const dateStr = d ? d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + (d.getHours() ? ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '') : 'TBD';
+              const d = iv.scheduled_at ? new Date(iv.scheduled_at + 'Z') : null;
+              const PT = {timeZone: 'America/Los_Angeles'};
+              const dateStr = d ? d.toLocaleDateString('en-US', {month:'short',day:'numeric',...PT}) + (d.getUTCHours() || d.getUTCMinutes() ? ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',...PT}) : '') : 'TBD';
               const isPast = d && d < new Date();
               const color = isPast ? '#628a6a' : '#69db7c';
               return `<span style="font-size:11px;font-weight:600;color:${color};background:${color}18;border:1px solid ${color}44;border-radius:4px;padding:2px 7px">📅 ${esc(iv.round)} · ${dateStr}</span>`;
