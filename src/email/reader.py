@@ -53,13 +53,16 @@ def _decode_str(value: str | bytes | None) -> str:
 
 
 def _get_body(msg) -> str:
-    """Extract plain-text body from email message."""
+    """Extract plain-text body from email message, falling back to stripped HTML."""
     body = ""
+    html_fallback = ""
     if msg.is_multipart():
         for part in msg.walk():
             ct = part.get_content_type()
             cd = str(part.get("Content-Disposition", ""))
-            if ct == "text/plain" and "attachment" not in cd:
+            if "attachment" in cd:
+                continue
+            if ct == "text/plain":
                 try:
                     body += part.get_payload(decode=True).decode(
                         part.get_content_charset() or "utf-8", errors="replace"
@@ -68,6 +71,15 @@ def _get_body(msg) -> str:
                     pass
                 if len(body) > 3000:
                     break
+            elif ct == "text/html" and not html_fallback:
+                try:
+                    raw = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
+                    html_fallback = re.sub(r"<[^>]+>", " ", raw)
+                    html_fallback = re.sub(r"\s{2,}", " ", html_fallback).strip()
+                except Exception:
+                    pass
     else:
         try:
             body = msg.get_payload(decode=True).decode(
@@ -75,11 +87,11 @@ def _get_body(msg) -> str:
             )
         except Exception:
             pass
-    return body[:3000]
+    return (body or html_fallback)[:3000]
 
 
 def _extract_ical_date(msg) -> datetime | None:
-    """Look for a text/calendar MIME part and parse DTSTART from it."""
+    """Look for a text/calendar MIME part and parse DTSTART from the VEVENT block."""
     for part in msg.walk():
         if part.get_content_type() not in ("text/calendar", "application/ics"):
             continue
@@ -90,20 +102,25 @@ def _extract_ical_date(msg) -> datetime | None:
         except Exception:
             continue
 
-        # DTSTART:20260610T140000Z  or  DTSTART;TZID=...:20260610T140000
-        m = re.search(r"DTSTART(?:;[^:]+)?:(\d{8}T\d{6})(Z?)", ical_text)
+        # Only look inside VEVENT blocks — VTIMEZONE also has DTSTART entries (epoch dates)
+        vevent = re.search(r"BEGIN:VEVENT(.*?)END:VEVENT", ical_text, re.DOTALL)
+        if not vevent:
+            continue
+        vevent_text = vevent.group(1)
+
+        # DTSTART;TZID=America/Chicago:20260604T163000  or  DTSTART:20260610T140000Z
+        m = re.search(r"^DTSTART(?:;[^:]+)?:(\d{8}T\d{6})(Z?)", vevent_text, re.MULTILINE)
         if m:
             try:
-                dt_str = m.group(1)
-                dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S")
+                dt = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S")
                 if m.group(2) == "Z":
                     dt = dt.replace(tzinfo=timezone.utc).replace(tzinfo=None)
                 return dt
             except Exception:
                 pass
 
-        # All-day event: DTSTART;VALUE=DATE:20260610
-        m = re.search(r"DTSTART;VALUE=DATE:(\d{8})", ical_text)
+        # All-day: DTSTART;VALUE=DATE:20260610
+        m = re.search(r"^DTSTART;VALUE=DATE:(\d{8})", vevent_text, re.MULTILINE)
         if m:
             try:
                 return datetime.strptime(m.group(1), "%Y%m%d")
@@ -124,28 +141,46 @@ _DATE_SENTENCE_RE = re.compile(
 )
 
 
-def _extract_body_date(body: str) -> datetime | None:
-    """Try to parse a scheduled interview datetime from email body text."""
+def _extract_body_date(text: str) -> datetime | None:
+    """Try to parse a scheduled interview datetime from subject + body text."""
     from dateutil import parser as du_parser
     from dateutil.parser import ParserError
 
-    # Only attempt parsing on sentences that look like scheduled times
-    matches = _DATE_SENTENCE_RE.findall(body)
+    now = datetime.utcnow()
+    future_limit = datetime(now.year + 1, now.month, now.day)
+
+    def _valid(dt) -> bool:
+        return now.replace(hour=0, minute=0) <= dt.replace(tzinfo=None) <= future_limit
+
+    # For short strings (e.g. subject lines), try direct fuzzy parse first
+    if len(text) < 120 and any(w in text.lower() for w in
+            ["interview", "scheduled", "meeting", "call", "invite"]):
+        try:
+            dt = du_parser.parse(text, fuzzy=True, dayfirst=False)
+            if _valid(dt):
+                return dt.replace(tzinfo=None)
+        except (ParserError, OverflowError, ValueError):
+            pass
+
+    # For longer bodies, gate on sentences that look like scheduled times
+    matches = _DATE_SENTENCE_RE.findall(text)
     for snippet in matches[:5]:
         try:
             dt = du_parser.parse(snippet, fuzzy=True, dayfirst=False)
-            # Sanity check: must be in the future relative to today and within 6 months
-            now = datetime.utcnow()
-            if now <= dt.replace(tzinfo=None) <= datetime(now.year + 1, now.month, now.day):
+            if _valid(dt):
                 return dt.replace(tzinfo=None)
         except (ParserError, OverflowError, ValueError):
             continue
     return None
 
 
-def _extract_interview_date(msg, body: str) -> datetime | None:
-    """ICS attachment first, then body text parsing."""
-    return _extract_ical_date(msg) or _extract_body_date(body)
+def _extract_interview_date(msg, body: str, subject: str = "") -> datetime | None:
+    """ICS attachment first, then subject alone, then full body."""
+    return (
+        _extract_ical_date(msg)
+        or _extract_body_date(subject)
+        or _extract_body_date(body)
+    )
 
 
 def _infer_round(subject: str, body: str) -> str:
@@ -327,7 +362,7 @@ def run_email_sync() -> dict:
                                 notes=subject[:200], source="email",
                             )
 
-                            interview_dt = _extract_interview_date(msg, body)
+                            interview_dt = _extract_interview_date(msg, body, subject)
                             if interview_dt:
                                 round_name = _infer_round(subject, body)
                                 # Only create if no existing interview on same day
