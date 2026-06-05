@@ -1583,6 +1583,44 @@ function _toggleInterviewCard(id) {
   if (chevron) chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
 }
 
+function _renderInterviewRounds(a) {
+  const rounds = a.interviews || [];
+  const rows = rounds.map(iv => {
+    const d = iv.scheduled_at ? new Date(iv.scheduled_at) : null;
+    const dateStr = d
+      ? d.toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric'})
+        + (d.getHours() ? ' at ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '')
+      : '—';
+    const isPast = d && d < new Date();
+    const outcomeColor = iv.outcome === 'pass' ? '#69db7c' : iv.outcome === 'fail' ? '#e85a5a' : '#628a6a';
+    const outcomeLabel = iv.outcome ? iv.outcome.charAt(0).toUpperCase() + iv.outcome.slice(1) : 'Pending';
+    return `
+      <tr style="border-bottom:1px solid #1c3020">
+        <td style="padding:7px 10px;font-size:13px;color:#dff0d4;white-space:nowrap">${esc(iv.round)}</td>
+        <td style="padding:7px 10px;font-size:13px;color:${isPast ? '#628a6a' : '#adc9a0'};white-space:nowrap">${dateStr}</td>
+        <td style="padding:7px 10px;font-size:11px;color:${outcomeColor}">${outcomeLabel}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#628a6a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(iv.notes || '')}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-weight:600">Scheduled Interviews</div>
+      ${rounds.length ? `
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="font-size:10px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #1c3020">
+              <th style="text-align:left;padding:5px 10px;font-weight:500">Round</th>
+              <th style="text-align:left;padding:5px 10px;font-weight:500">Date & Time</th>
+              <th style="text-align:left;padding:5px 10px;font-weight:500">Outcome</th>
+              <th style="text-align:left;padding:5px 10px;font-weight:500">Notes</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>` : `<div style="font-size:12px;color:#628a6a">No interviews scheduled yet — they appear here automatically from your email and Google Calendar.</div>`}
+    </div>`;
+}
+
 function _renderInterviewCard(a) {
   const statusColors = { phone_screen: '#74c0fc', interview: '#69db7c', offer: '#c084fc' };
   const statusLabels = { phone_screen: 'Phone Screen', interview: 'Interview', offer: 'Offer 🎉' };
@@ -1626,8 +1664,15 @@ function _renderInterviewCard(a) {
             <span style="font-weight:600;color:#adc9a0">${esc(a.job.company_name)}</span>
             ${a.job.level ? `<span class="badge">${esc(a.job.level)}</span>` : ''}
           </div>
-          <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+          <div style="display:flex;align-items:center;gap:12px;margin-top:4px;flex-wrap:wrap">
             ${a.applied_at ? `<span style="font-size:11px;color:#628a6a">Applied ${formatDate(a.applied_at)}</span>` : ''}
+            ${(a.interviews || []).map(iv => {
+              const d = iv.scheduled_at ? new Date(iv.scheduled_at) : null;
+              const dateStr = d ? d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + (d.getHours() ? ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : '') : 'TBD';
+              const isPast = d && d < new Date();
+              const color = isPast ? '#628a6a' : '#69db7c';
+              return `<span style="font-size:11px;font-weight:600;color:${color};background:${color}18;border:1px solid ${color}44;border-radius:4px;padding:2px 7px">📅 ${esc(iv.round)} · ${dateStr}</span>`;
+            }).join('')}
             ${notionHtml}
           </div>
         </div>
@@ -1636,6 +1681,7 @@ function _renderInterviewCard(a) {
         </button>
       </div>
       <div class="icard-body hidden" id="ibody-${a.id}">
+        ${_renderInterviewRounds(a)}
         ${descHtml}
         <div class="icard-prep${prepHtml ? '' : ' hidden'}" id="iprep-${a.id}">${prepHtml}</div>
         ${!prepHtml ? `<div style="padding:16px 0 4px;font-size:12px;color:#628a6a">Click <em>Generate Prep</em> to build AI-powered interview preparation for this role.</div>` : ''}
