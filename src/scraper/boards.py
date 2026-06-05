@@ -62,9 +62,23 @@ async def _scrape_wellfound(client, titles: list[str], locations: list[str], lev
             seen.add(url)
 
             title    = _title_from_url(url) or _clean_title(r.get("title", ""))
-            # Try extracting company from URL: wellfound.com/company/{slug}/jobs/{id}
-            m = re.search(r"wellfound\.com/(?:company/([^/?#]+)/jobs|jobs/([^/?#]+))", url)
-            company  = (m.group(1) or m.group(2) or "").replace("-", " ").title() if m else ""
+
+            # Extract company only from /company/{slug}/jobs/ URL format.
+            # The /jobs/{id}-{title} format has no company in the URL.
+            m = re.search(r"wellfound\.com/company/([^/?#]+)/jobs", url)
+            company = m.group(1).replace("-", " ").title() if m else ""
+
+            # Fallback: parse "at {Company}" from DDG title or snippet
+            if not company:
+                dgg_title = r.get("title", "")
+                at_match = re.search(r"\bat\s+([A-Z][^·\|\-–—,]+?)(?:\s*[·\|\-–—,]|$)", dgg_title)
+                if at_match:
+                    company = at_match.group(1).strip()
+
+            # Skip jobs with no resolvable company name
+            if not company:
+                continue
+
             location = ""
             if "remote" in snip.lower():
                 location = "Remote"
@@ -76,7 +90,7 @@ async def _scrape_wellfound(client, titles: list[str], locations: list[str], lev
 
             results.append({
                 "company_job_id": _job_id(url),
-                "company_name":   company or "Unknown",
+                "company_name":   company,
                 "job_title":      title,
                 "location":       location or None,
                 "level":          _infer_level(title),
