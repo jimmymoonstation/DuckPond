@@ -53,12 +53,13 @@ def start_scheduler():
         max_instances=1,
     )
 
-    # Company auto-discovery via web search, daily at 2 AM PT
+    # Company auto-discovery: every 6 hours (2am, 8am, 2pm, 8pm PT)
     scheduler.add_job(
         run_company_discovery,
-        trigger=CronTrigger(hour=2, minute=0, timezone=PT),
+        trigger=CronTrigger(hour="2,8,14,20", minute=0, timezone=PT),
         id="company_discovery",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Job link validator: every 4 hours at staggered PT times

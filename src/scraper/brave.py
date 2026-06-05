@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/web/v1/search"
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
 HEADERS = {
     "Accept": "application/json",
@@ -67,6 +67,8 @@ async def search_jobs(titles: list[str], locations: list[str], keywords: list[st
                     break
                 data = resp.json()
                 _brave_failures = 0  # success — reset
+                from src.api.usage import record_brave
+                record_brave(calls=1)
                 urls = [r["url"] for r in data.get("web", {}).get("results", [])]
                 for url in urls:
                     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as fetch_client:

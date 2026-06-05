@@ -406,7 +406,7 @@ async def scrape_linkedin_only(
     locations: list[str],
     levels: list[str] = None,
     geo_id: str = "90000084",
-    time_filter: str = "r3600",
+    time_filter: str = "r300",   # last 5 min — matches the 5-min scheduler cadence
 ) -> list[dict]:
     """Lightweight LinkedIn-only scrape for high-frequency polling."""
     import asyncio

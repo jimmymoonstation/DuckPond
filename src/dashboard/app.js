@@ -73,6 +73,7 @@ function switchTab(tabName, pushState = true) {
   if (tabName === 'messages')   loadLinkedInMessages();
   if (tabName === 'analysis')   loadAnalysis();
   if (tabName === 'interviews') loadInterviewPrep();
+  if (tabName === 'usage')      loadUsage();
 }
 
 function setupTabs() {
@@ -1834,4 +1835,74 @@ function _extractNotionId(input) {
     || input.match(/([0-9a-f]{32})/i);
   if (m) return m[1];
   return input.trim();
+}
+
+// ── API Usage ──────────────────────────────────────────────────────────────────
+
+async function loadUsage() {
+  const body = document.getElementById('usage-body');
+  const cards = document.getElementById('usage-cards');
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="4" class="loading" style="padding:40px;text-align:center">Loading…</td></tr>';
+
+  const data = await apiFetch('/usage');
+  if (!data) { body.innerHTML = '<tr><td colspan="4" class="loading">Failed to load</td></tr>'; return; }
+
+  // Summary cards
+  const braveUsed = data.monthly.brave;
+  const braveLimit = data.brave_limit;
+  const bravePct = data.brave_pct;
+  const braveColor = bravePct > 80 ? '#e85a5a' : bravePct > 50 ? '#f5c842' : '#3ddc6b';
+
+  const claudeTotalTokens = data.monthly.claude_tokens_in + data.monthly.claude_tokens_out;
+  const claudeCost = data.monthly.claude_cost_usd;
+
+  cards.innerHTML = `
+    <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Brave API — ${data.month}</div>
+      <div style="font-size:24px;font-weight:700;color:${braveColor}">${braveUsed.toLocaleString()}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:4px">of ${braveLimit.toLocaleString()} free / month</div>
+      <div style="margin-top:10px;height:4px;background:#1c3020;border-radius:2px">
+        <div style="height:4px;background:${braveColor};border-radius:2px;width:${Math.min(bravePct,100)}%"></div>
+      </div>
+      <div style="font-size:11px;color:#628a6a;margin-top:4px">${data.brave_remaining.toLocaleString()} remaining</div>
+    </div>
+    <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Webshare Proxy — ${data.month}</div>
+      <div style="font-size:24px;font-weight:700;color:#74c0fc">${data.monthly.webshare.toLocaleString()}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:4px">calls this month</div>
+      <div style="font-size:20px;font-weight:600;color:#74c0fc;margin-top:10px">${data.monthly.webshare_mb.toFixed(1)} MB</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:2px">estimated data used</div>
+    </div>
+    <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Claude API — ${data.month}</div>
+      <div style="font-size:24px;font-weight:700;color:#c084fc">${data.monthly.claude_calls.toLocaleString()}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:4px">messages this month</div>
+      <div style="font-size:20px;font-weight:600;color:#c084fc;margin-top:10px">${claudeTotalTokens.toLocaleString()}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:2px">tokens (in + out)</div>
+      <div style="font-size:16px;font-weight:600;color:${claudeCost > 1 ? '#f5c842' : '#c084fc'};margin-top:8px">$${claudeCost.toFixed(4)}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:2px">estimated cost (Haiku)</div>
+    </div>`;
+
+  // Daily table
+  if (!data.daily.length) {
+    body.innerHTML = '<tr><td colspan="7" class="loading" style="padding:20px;text-align:center">No usage recorded yet — data appears after the next scrape run.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = data.daily.map(r => {
+    const claudeTokens = (r.claude_tokens_in || 0) + (r.claude_tokens_out || 0);
+    const claudeCalls = r.claude_calls || 0;
+    const claudeCost = r.claude_cost_usd || 0;
+    return `
+    <tr style="border-bottom:1px solid #1c3020">
+      <td style="padding:9px 12px;font-size:13px;color:#dff0d4">${r.date}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:${r.brave > 0 ? '#3ddc6b' : '#628a6a'}">${r.brave > 0 ? r.brave.toLocaleString() : '—'}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:${r.webshare > 0 ? '#74c0fc' : '#628a6a'}">${r.webshare > 0 ? r.webshare.toLocaleString() : '—'}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:#628a6a">${r.webshare_mb > 0 ? r.webshare_mb.toFixed(2) + ' MB' : '—'}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:${claudeCalls > 0 ? '#c084fc' : '#628a6a'}">${claudeCalls > 0 ? claudeCalls.toLocaleString() : '—'}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:${claudeTokens > 0 ? '#c084fc' : '#628a6a'}">${claudeTokens > 0 ? claudeTokens.toLocaleString() : '—'}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;color:#628a6a">${claudeCost > 0 ? '$' + claudeCost.toFixed(4) : '—'}</td>
+    </tr>`;
+  }).join('');
 }

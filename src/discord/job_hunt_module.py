@@ -43,6 +43,11 @@ async def handle_message(channel_id: str, user_content: str) -> str:
             messages=messages,
         )
         assistant_text = resp.content[0].text
+        try:
+            from src.api.usage import record_claude
+            record_claude(resp.usage.input_tokens, resp.usage.output_tokens)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Claude API error: {e}")
         return "Sorry, I hit an error reaching Claude. Try again in a moment."

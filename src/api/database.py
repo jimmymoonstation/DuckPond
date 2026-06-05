@@ -49,6 +49,30 @@ def _migrate_db():
             conn.execute(text("ALTER TABLE notion_config ADD COLUMN interviews_parent_page_id TEXT"))
             conn.commit()
 
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       TEXT NOT NULL,
+                service    TEXT NOT NULL,
+                calls      INTEGER NOT NULL DEFAULT 0,
+                bytes_est  INTEGER NOT NULL DEFAULT 0,
+                tokens_in  INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(date, service)
+            )
+        """))
+        conn.commit()
+
+        # Add token columns if missing (migration for existing databases)
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(api_usage)"))}
+        if "tokens_in" not in existing:
+            conn.execute(text("ALTER TABLE api_usage ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0"))
+            conn.commit()
+        if "tokens_out" not in existing:
+            conn.execute(text("ALTER TABLE api_usage ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0"))
+            conn.commit()
+
         # Seed a single NotionConfig row if the table is empty
     with engine.connect() as conn:
         from src.api.models import NotionConfig  # noqa: F401 — ensure table exists

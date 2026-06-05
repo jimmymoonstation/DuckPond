@@ -136,25 +136,33 @@ _DDG_FAILURE_LIMIT = 3   # trip the breaker after this many consecutive timeouts
 
 
 def reset_ddg_circuit():
-    """Call at the start of each scraper run to reset the circuit breaker."""
     global _ddg_failures
     _ddg_failures = 0
 
 
+def _get_proxy() -> str | None:
+    import os
+    return os.getenv("WEB_SEARCH_PROXY") or None
+
+
 def _ddg_text(query: str, max_results: int = 15) -> list[dict]:
-    """Synchronous DDG text search with circuit breaker for consecutive timeouts."""
+    """Synchronous DDG text search with proxy support and circuit breaker."""
     global _ddg_failures
     import time
 
     if _ddg_failures >= _DDG_FAILURE_LIMIT:
-        return []   # breaker open — skip silently
+        return []
 
     try:
         from ddgs import DDGS
-        with DDGS() as ddgs:
+        proxy = _get_proxy()
+        with DDGS(proxy=proxy) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        _ddg_failures = 0   # success — reset counter
-        time.sleep(1.0)
+        _ddg_failures = 0
+        time.sleep(0.5)
+        if proxy and results is not None:
+            from src.api.usage import record_webshare
+            record_webshare(calls=1)
         return results
     except Exception as e:
         _ddg_failures += 1
@@ -245,24 +253,39 @@ async def scrape_via_web_search(
 # ── 2. Auto-discovery of new companies on standard ATS platforms ───────────────
 
 _ATS_SEARCH_DOMAINS = [
-    ("boards.greenhouse.io",        "greenhouse",     r"boards\.greenhouse\.io/([^/?#]+)"),
-    ("job-boards.greenhouse.io",    "greenhouse",     r"job-boards\.greenhouse\.io/([^/?#]+)"),
-    ("jobs.lever.co",               "lever",          r"jobs\.lever\.co/([^/?#]+)"),
-    ("jobs.ashbyhq.com",            "ashby",          r"jobs\.ashbyhq\.com/([^/?#]+)"),
-    ("jobs.smartrecruiters.com",    "smartrecruiters",r"jobs\.smartrecruiters\.com/([^/?#]+)"),
-    ("apply.workable.com",          "workable",       r"apply\.workable\.com/([^/?#]+)"),
+    # Greenhouse (two URL formats)
+    ("boards.greenhouse.io",        "greenhouse",      r"boards\.greenhouse\.io/([^/?#]+)"),
+    ("job-boards.greenhouse.io",    "greenhouse",      r"job-boards\.greenhouse\.io/([^/?#]+)"),
+    # Lever
+    ("jobs.lever.co",               "lever",           r"jobs\.lever\.co/([^/?#]+)"),
+    # Ashby
+    ("jobs.ashbyhq.com",            "ashby",           r"jobs\.ashbyhq\.com/([^/?#]+)"),
+    # SmartRecruiters
+    ("jobs.smartrecruiters.com",    "smartrecruiters", r"jobs\.smartrecruiters\.com/([^/?#]+)"),
+    # Workday (matches {slug}.wd5.myworkdayjobs.com etc.)
+    ("myworkdayjobs.com",           "workday",         r"([\w-]+)\.(?:wd\d+)\.myworkdayjobs\.com"),
+    # Rippling ATS
+    ("ats.rippling.com",            "rippling",        r"ats\.rippling\.com/([^/?#]+)"),
+    # Workable
+    ("apply.workable.com",          "workable",        r"apply\.workable\.com/([^/?#]+)"),
 ]
+
+_NOISE_SLUGS = {
+    "", "jobs", "careers", "embed", "v1", "api", "search", "apply",
+    "jobright", "jobright.ai", "dice", "ziprecruiter", "builtinsf",
+    "builtin", "simplyhired", "monster", "careerbuilder", "talent",
+    "adzuna", "getwork", "indeed", "glassdoor", "linkedin",
+}
+
+# Focused location keywords for discovery queries
+_DISCOVERY_LOCS = '"Bay Area" OR "San Francisco" OR "Remote" OR "New York" OR "Seattle"'
 
 
 async def discover_new_companies(
     titles: list[str],
     locations: list[str],
 ) -> list[dict]:
-    """
-    Search DDG for jobs matching user criteria on standard ATS boards.
-    Returns a list of new company dicts {company_name, ats_type, ats_slug, career_url}
-    for companies not yet in the DB.
-    """
+    """Search DDG + Brave API for jobs on standard ATS boards to find untracked companies."""
     from src.api.database import SessionLocal
     from src.api.models import TrackedCompany
 
@@ -274,71 +297,150 @@ async def discover_new_companies(
     finally:
         db.close()
 
-    candidates = {}  # (ats_type, slug) -> dict
+    candidates = {}
+    loc_kw = _DISCOVERY_LOCS
 
-    loc_kw = " OR ".join(f'"{l}"' for l in locations[:3]) if locations else '"Bay Area" OR "San Francisco" OR "remote"'
+    career_url_map = {
+        "greenhouse":      "https://job-boards.greenhouse.io/{slug}",
+        "lever":           "https://jobs.lever.co/{slug}",
+        "ashby":           "https://jobs.ashbyhq.com/{slug}",
+        "smartrecruiters": "https://jobs.smartrecruiters.com/{slug}",
+        "rippling":        "https://ats.rippling.com/{slug}",
+        "workable":        "https://apply.workable.com/{slug}",
+    }
 
-    for title_kw in titles[:3]:
+    def _process_url(url: str):
         for domain, ats_type, slug_pattern in _ATS_SEARCH_DOMAINS:
+            if domain not in url:
+                continue
+            m = re.search(slug_pattern, url)
+            if not m:
+                continue
+            slug = m.group(1).lower().rstrip("/").split("/")[0]
+            if slug in _NOISE_SLUGS:
+                return
+            key = (ats_type, slug)
+            if key in tracked_keys or key in candidates:
+                return
+            normalized = re.sub(r"[^a-z0-9]", "", slug)
+            if normalized in tracked_names:
+                return
+            company_name = slug.replace("-", " ").replace("_", " ").title()
+            url_template = career_url_map.get(ats_type, url)
+            candidates[key] = {
+                "company_name":    company_name,
+                "ats_type":        ats_type,
+                "ats_slug":        slug,
+                "career_url":      url_template.format(slug=slug),
+                "discovered_from": "auto",
+            }
+            logger.info(f"CompanyDiscovery: found {company_name} ({ats_type}:{slug})")
+
+    # Search DDG across all titles and ATS domains
+    for title_kw in titles:  # all titles, not just first 3
+        for domain, ats_type, _ in _ATS_SEARCH_DOMAINS:
             query = f'"{title_kw}" {loc_kw} site:{domain}'
-            logger.info(f"CompanyDiscovery: {query}")
-
             results = await asyncio.get_event_loop().run_in_executor(
-                None, _ddg_text, query, 20
+                None, _ddg_text, query, 30
             )
-
             for r in results:
-                url = r.get("href", "")
-                m   = re.search(slug_pattern, url)
-                if not m:
-                    continue
+                _process_url(r.get("href", ""))
 
-                slug = m.group(1).lower().rstrip("/")
-                # Skip noise / job-board meta pages and known aggregators
-                _NOISE_SLUGS = {"", "jobs", "careers", "embed", "v1", "api",
-                                "jobright", "jobright.ai", "dice", "ziprecruiter",
-                                "builtinsf", "builtin", "simplyhired", "monster",
-                                "careerbuilder", "talent", "adzuna", "getwork"}
-                if slug in _NOISE_SLUGS:
-                    continue
-
-                key = (ats_type, slug)
-                if key in tracked_keys or key in candidates:
-                    continue
-
-                # Guess company name from slug
-                company_name = slug.replace("-", " ").replace("_", " ").title()
-
-                # Skip if a company with a very similar name is already tracked
-                normalized = slug.replace("-", "").replace("_", "").replace("+", "")
-                if normalized in tracked_names:
-                    continue
-
-                career_url_map = {
-                    "greenhouse":      f"https://job-boards.greenhouse.io/{slug}",
-                    "lever":           f"https://jobs.lever.co/{slug}",
-                    "ashby":           f"https://jobs.ashbyhq.com/{slug}",
-                    "smartrecruiters": f"https://jobs.smartrecruiters.com/{slug}",
-                }
-
-                candidates[key] = {
-                    "company_name": company_name,
-                    "ats_type":     ats_type,
-                    "ats_slug":     slug,
-                    "career_url":   career_url_map.get(ats_type, url),
-                    "discovered_from": "web_search",
-                }
-                logger.info(f"CompanyDiscovery: found new company {company_name} ({ats_type}:{slug})")
+    # Also search Brave API for additional coverage
+    await _brave_discover(titles, candidates, tracked_keys, tracked_names, _process_url)
 
     return list(candidates.values())
 
 
-# ── 3. Orchestrator called by the scheduler ───────────────────────────────────
+async def _brave_discover(titles, candidates, tracked_keys, tracked_names, process_fn):
+    """Use Brave Search API to find additional untracked companies."""
+    import os
+    import httpx
+    key = os.getenv("BRAVE_API_KEY", "")
+    if not key:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            for title in titles[:3]:
+                for domain, _, _ in _ATS_SEARCH_DOMAINS[:6]:
+                    query = f'"{title}" "Bay Area" OR "Remote" site:{domain}'
+                    resp = await client.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        headers={"Accept": "application/json", "Accept-Encoding": "gzip",
+                                 "X-Subscription-Token": key},
+                        params={"q": query, "count": 20},
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    from src.api.usage import record_brave
+                    record_brave(calls=1)
+                    for result in resp.json().get("web", {}).get("results", []):
+                        process_fn(result.get("url", ""))
+    except Exception as e:
+        logger.debug(f"Brave discovery error: {e}")
+
+
+# ── 3. YC company discovery ────────────────────────────────────────────────────
+
+async def discover_yc_companies() -> list[dict]:
+    """Scrape the YC company directory and probe each for a known ATS."""
+    import httpx
+    from src.api.database import SessionLocal
+    from src.api.models import TrackedCompany
+
+    db = SessionLocal()
+    try:
+        tracked_names = {c.company_name.lower().replace(" ", "").replace("-", "")
+                         for c in db.query(TrackedCompany).all()}
+    finally:
+        db.close()
+
+    new_companies = []
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://api.ycombinator.com/v0.1/companies?batch=W25&batch=S25&batch=W24&batch=S24",
+                headers={"Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return []
+            companies = resp.json().get("companies", [])
+            logger.info(f"YC discovery: found {len(companies)} YC companies to probe")
+            for co in companies[:60]:  # probe up to 60 per run
+                name = co.get("name", "")
+                if not name:
+                    continue
+                norm = name.lower().replace(" ", "").replace("-", "")
+                if norm in tracked_names:
+                    continue
+                from src.api.routes.companies import _auto_probe
+                probe = asyncio.run(_auto_probe(name)) if not asyncio.get_event_loop().is_running() else await _auto_probe_async(name, client)
+                if probe:
+                    new_companies.append({
+                        "company_name":    name,
+                        "ats_type":        probe["ats_type"],
+                        "ats_slug":        probe["ats_slug"],
+                        "career_url":      co.get("url", ""),
+                        "discovered_from": "yc",
+                    })
+                    tracked_names.add(norm)
+    except Exception as e:
+        logger.warning(f"YC discovery failed: {e}")
+    return new_companies
+
+
+async def _auto_probe_async(company_name: str, client) -> dict | None:
+    """Async version of company ATS probe."""
+    from src.api.routes.companies import _auto_probe
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: asyncio.run(_auto_probe(company_name)))
+
+
+# ── 4. Orchestrator called by the scheduler ───────────────────────────────────
 
 async def run_company_discovery() -> dict:
-    """
-    Full discovery run: search DDG → find new companies → add to DB → return summary.
-    """
+    """Full discovery run: DDG + Brave + YC → find new companies → add to DB."""
     import json
     from src.api.database import SessionLocal
     from src.api.models import SearchConfig, TrackedCompany
@@ -352,28 +454,31 @@ async def run_company_discovery() -> dict:
         db.close()
 
     if not titles:
-        logger.info("CompanyDiscovery: no job titles configured, skipping")
+        logger.info("CompanyDiscovery: no titles configured, skipping")
         return {"new": 0, "skipped": 0}
 
+    # Run DDG + Brave discovery
     candidates = await discover_new_companies(titles, locations)
 
-    added = 0
-    skipped = 0
+    # Also run YC discovery
+    yc_candidates = await discover_yc_companies()
+    candidates.extend(yc_candidates)
+
+    added = skipped = 0
     db = SessionLocal()
     try:
-        # Load current names to avoid same-name duplicates across ATS types
         existing_names = {
-            c.company_name.lower().replace(" ", "").replace("-", "")
+            re.sub(r"[^a-z0-9]", "", c.company_name.lower())
             for c in db.query(TrackedCompany).all()
         }
-        for c in candidates[:30]:   # cap per-run additions
+        for c in candidates[:50]:   # increased cap: 30 → 50
             existing = db.query(TrackedCompany).filter_by(
                 ats_type=c["ats_type"], ats_slug=c["ats_slug"]
             ).first()
             if existing:
                 skipped += 1
                 continue
-            norm = c["ats_slug"].replace("-", "").replace("_", "").replace("+", "")
+            norm = re.sub(r"[^a-z0-9]", "", c["ats_slug"])
             if norm in existing_names:
                 skipped += 1
                 continue
@@ -381,8 +486,8 @@ async def run_company_discovery() -> dict:
                 company_name=c["company_name"],
                 ats_type=c["ats_type"],
                 ats_slug=c["ats_slug"],
-                career_url=c["career_url"],
-                discovered_from="web_search",
+                career_url=c.get("career_url", ""),
+                discovered_from=c.get("discovered_from", "auto"),
                 is_active=True,
             ))
             existing_names.add(norm)
@@ -391,5 +496,5 @@ async def run_company_discovery() -> dict:
     finally:
         db.close()
 
-    logger.info(f"CompanyDiscovery: added {added} new companies, {skipped} already tracked")
+    logger.info(f"CompanyDiscovery: added {added} new, {skipped} already tracked (from {len(candidates)} candidates)")
     return {"new": added, "skipped": skipped, "candidates": len(candidates)}
