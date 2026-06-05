@@ -73,6 +73,19 @@ def _migrate_db():
             conn.execute(text("ALTER TABLE api_usage ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0"))
             conn.commit()
 
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS api_quota (
+                service          TEXT PRIMARY KEY,
+                quota_used       INTEGER DEFAULT 0,
+                quota_limit      INTEGER DEFAULT 0,
+                quota_remaining  INTEGER DEFAULT 0,
+                bandwidth_bytes  INTEGER DEFAULT 0,
+                updated_at       TEXT
+            )
+        """))
+        conn.commit()
+
         # Seed a single NotionConfig row if the table is empty
     with engine.connect() as conn:
         from src.api.models import NotionConfig  # noqa: F401 — ensure table exists

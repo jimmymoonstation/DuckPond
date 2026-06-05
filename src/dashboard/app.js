@@ -1839,49 +1839,90 @@ function _extractNotionId(input) {
 
 // ── API Usage ──────────────────────────────────────────────────────────────────
 
+function _liveBadge(isLive) {
+  return isLive
+    ? '<span style="font-size:9px;font-weight:700;background:#1c3020;color:#3ddc6b;border:1px solid #2a5030;border-radius:4px;padding:1px 5px;vertical-align:middle;margin-left:5px">LIVE</span>'
+    : '<span style="font-size:9px;font-weight:700;background:#1c2228;color:#628a6a;border:1px solid #2a3a44;border-radius:4px;padding:1px 5px;vertical-align:middle;margin-left:5px">EST</span>';
+}
+
+async function refreshLiveUsage() {
+  const btn = document.getElementById('btn-refresh-live');
+  if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
+  await apiFetch('/usage/refresh', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh Live'; }
+  await loadUsage();
+}
+
 async function loadUsage() {
   const body = document.getElementById('usage-body');
   const cards = document.getElementById('usage-cards');
   if (!body) return;
-  body.innerHTML = '<tr><td colspan="4" class="loading" style="padding:40px;text-align:center">Loading…</td></tr>';
+  body.innerHTML = '<tr><td colspan="7" class="loading" style="padding:40px;text-align:center">Loading…</td></tr>';
 
   const data = await apiFetch('/usage');
-  if (!data) { body.innerHTML = '<tr><td colspan="4" class="loading">Failed to load</td></tr>'; return; }
+  if (!data) { body.innerHTML = '<tr><td colspan="7" class="loading">Failed to load</td></tr>'; return; }
 
-  // Summary cards
-  const braveUsed = data.monthly.brave;
+  // ── Brave card (quota from response headers — auto-updated on each scrape run)
+  const braveUsed = data.brave_used_live ?? data.monthly.brave;
   const braveLimit = data.brave_limit;
   const bravePct = data.brave_pct;
   const braveColor = bravePct > 80 ? '#e85a5a' : bravePct > 50 ? '#f5c842' : '#3ddc6b';
+  const braveIsLive = !!data.brave_quota_updated_at;
+  const braveUpdated = data.brave_quota_updated_at
+    ? `<div style="font-size:10px;color:#3a5a3a;margin-top:6px">Updated ${new Date(data.brave_quota_updated_at).toLocaleString()}</div>` : '';
 
-  const claudeTotalTokens = data.monthly.claude_tokens_in + data.monthly.claude_tokens_out;
-  const claudeCost = data.monthly.claude_cost_usd;
+  // ── Webshare card
+  const ws = data.webshare_live;
+  const wsIsLive = !!ws;
+  const wsCalls = wsIsLive ? ws.quota_used : data.monthly.webshare;
+  const wsBytes = wsIsLive ? ws.bandwidth_bytes : (data.monthly.webshare * 10240);
+  const wsMB = (wsBytes / 1_048_576).toFixed(1);
+  const wsUpdated = wsIsLive && ws.updated_at
+    ? `<div style="font-size:10px;color:#3a5a3a;margin-top:6px">Updated ${new Date(ws.updated_at).toLocaleString()}</div>` : '';
+  const wsNoKey = !data.has_webshare_key
+    ? `<div style="font-size:10px;color:#628a6a;margin-top:6px">Add WEBSHARE_API_KEY for live data</div>` : '';
+
+  // ── Claude card
+  const cl = data.claude_live;
+  const clIsLive = !!cl;
+  const clCalls = clIsLive ? cl.quota_used : data.monthly.claude_calls;
+  const clTotalTokens = clIsLive
+    ? (cl.tokens_in || 0) + (cl.tokens_out || 0)
+    : (data.monthly.claude_tokens_in + data.monthly.claude_tokens_out);
+  const claudeCost = clIsLive ? cl.cost_usd : data.monthly.claude_cost_usd;
+  const clNoKey = !data.has_anthropic_admin_key
+    ? `<div style="font-size:10px;color:#628a6a;margin-top:6px">Add ANTHROPIC_ADMIN_KEY for live data</div>` : '';
+  const clUpdated = clIsLive && cl.updated_at
+    ? `<div style="font-size:10px;color:#3a5a3a;margin-top:6px">Updated ${new Date(cl.updated_at).toLocaleString()}</div>` : '';
 
   cards.innerHTML = `
     <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
-      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Brave API — ${data.month}</div>
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Brave API — ${data.month} ${_liveBadge(braveIsLive)}</div>
       <div style="font-size:24px;font-weight:700;color:${braveColor}">${braveUsed.toLocaleString()}</div>
-      <div style="font-size:12px;color:#628a6a;margin-top:4px">of ${braveLimit.toLocaleString()} free / month</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:4px">of ${braveLimit.toLocaleString()} / month</div>
       <div style="margin-top:10px;height:4px;background:#1c3020;border-radius:2px">
         <div style="height:4px;background:${braveColor};border-radius:2px;width:${Math.min(bravePct,100)}%"></div>
       </div>
       <div style="font-size:11px;color:#628a6a;margin-top:4px">${data.brave_remaining.toLocaleString()} remaining</div>
+      ${braveUpdated}
     </div>
     <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
-      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Webshare Proxy — ${data.month}</div>
-      <div style="font-size:24px;font-weight:700;color:#74c0fc">${data.monthly.webshare.toLocaleString()}</div>
-      <div style="font-size:12px;color:#628a6a;margin-top:4px">calls this month</div>
-      <div style="font-size:20px;font-weight:600;color:#74c0fc;margin-top:10px">${data.monthly.webshare_mb.toFixed(1)} MB</div>
-      <div style="font-size:12px;color:#628a6a;margin-top:2px">estimated data used</div>
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Webshare Proxy — ${data.month} ${_liveBadge(wsIsLive)}</div>
+      <div style="font-size:24px;font-weight:700;color:#74c0fc">${wsCalls.toLocaleString()}</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:4px">requests this month</div>
+      <div style="font-size:20px;font-weight:600;color:#74c0fc;margin-top:10px">${wsMB} MB</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:2px">${wsIsLive ? 'actual' : 'estimated'} data used</div>
+      ${wsUpdated}${wsNoKey}
     </div>
     <div style="background:#0e1f12;border:1px solid #1c3020;border-radius:10px;padding:16px 20px;min-width:200px">
-      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Claude API — ${data.month}</div>
-      <div style="font-size:24px;font-weight:700;color:#c084fc">${data.monthly.claude_calls.toLocaleString()}</div>
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Claude API — ${data.month} ${_liveBadge(clIsLive)}</div>
+      <div style="font-size:24px;font-weight:700;color:#c084fc">${clCalls.toLocaleString()}</div>
       <div style="font-size:12px;color:#628a6a;margin-top:4px">messages this month</div>
-      <div style="font-size:20px;font-weight:600;color:#c084fc;margin-top:10px">${claudeTotalTokens.toLocaleString()}</div>
+      <div style="font-size:20px;font-weight:600;color:#c084fc;margin-top:10px">${clTotalTokens.toLocaleString()}</div>
       <div style="font-size:12px;color:#628a6a;margin-top:2px">tokens (in + out)</div>
       <div style="font-size:16px;font-weight:600;color:${claudeCost > 1 ? '#f5c842' : '#c084fc'};margin-top:8px">$${claudeCost.toFixed(4)}</div>
-      <div style="font-size:12px;color:#628a6a;margin-top:2px">estimated cost (Haiku)</div>
+      <div style="font-size:12px;color:#628a6a;margin-top:2px">${clIsLive ? 'actual' : 'estimated'} cost (Haiku)</div>
+      ${clUpdated}${clNoKey}
     </div>`;
 
   // Daily table

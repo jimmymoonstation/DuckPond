@@ -69,6 +69,7 @@ async def search_jobs(titles: list[str], locations: list[str], keywords: list[st
                 _brave_failures = 0  # success — reset
                 from src.api.usage import record_brave
                 record_brave(calls=1)
+                _store_brave_quota(resp.headers)
                 urls = [r["url"] for r in data.get("web", {}).get("results", [])]
                 for url in urls:
                     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as fetch_client:
@@ -83,6 +84,46 @@ async def search_jobs(titles: list[str], locations: list[str], keywords: list[st
                     break
 
     return results
+
+
+def _store_brave_quota(headers) -> None:
+    """Parse X-RateLimit-Remaining header and persist monthly quota to api_quota table."""
+    try:
+        # Header format: "X-RateLimit-Remaining: <per_second>, <monthly>"
+        remaining_raw = headers.get("X-RateLimit-Remaining", "")
+        limit_raw = headers.get("X-RateLimit-Limit", "")
+        if not remaining_raw:
+            return
+        parts_remaining = [p.strip() for p in remaining_raw.split(",")]
+        parts_limit = [p.strip() for p in limit_raw.split(",")]
+        # Second value is the monthly window
+        monthly_remaining = int(parts_remaining[-1]) if parts_remaining else 0
+        monthly_limit = int(parts_limit[-1]) if parts_limit else BRAVE_MONTHLY_LIMIT
+        monthly_used = max(0, monthly_limit - monthly_remaining)
+
+        from src.api.database import SessionLocal
+        from sqlalchemy import text
+        from datetime import datetime, timezone
+        with SessionLocal() as db:
+            db.execute(text("""
+                INSERT INTO api_quota (service, quota_used, quota_limit, quota_remaining, updated_at)
+                VALUES ('brave', :used, :limit, :remaining, :ts)
+                ON CONFLICT(service) DO UPDATE SET
+                    quota_used      = excluded.quota_used,
+                    quota_limit     = excluded.quota_limit,
+                    quota_remaining = excluded.quota_remaining,
+                    updated_at      = excluded.updated_at
+            """), {
+                "used": monthly_used, "limit": monthly_limit,
+                "remaining": monthly_remaining,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            db.commit()
+    except Exception:
+        pass
+
+
+BRAVE_MONTHLY_LIMIT = 2000  # free tier default; overridden by live header data
 
 
 def _build_queries(titles: list[str], locations: list[str], keywords: list[str]) -> list[str]:

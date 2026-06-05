@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from sqlalchemy import text
@@ -5,6 +6,7 @@ from src.api.database import SessionLocal
 from src.api.usage import (
     BRAVE_MONTHLY_LIMIT, WEBSHARE_BYTES_PER_CALL,
     CLAUDE_HAIKU_INPUT_COST_PER_M, CLAUDE_HAIKU_OUTPUT_COST_PER_M,
+    fetch_webshare_live, fetch_anthropic_live,
 )
 
 router = APIRouter(prefix="/usage", tags=["usage"])
@@ -24,13 +26,19 @@ def get_usage():
             ORDER BY date DESC, service
         """)).fetchall()
 
-        # Monthly totals
+        # Monthly totals from local tracking
         monthly = db.execute(text("""
             SELECT service, SUM(calls), SUM(bytes_est), SUM(tokens_in), SUM(tokens_out)
             FROM api_usage
             WHERE date LIKE :month
             GROUP BY service
         """), {"month": f"{month}%"}).fetchall()
+
+        # Cached quota data (from response headers / last live fetch)
+        quota_rows = db.execute(text("""
+            SELECT service, quota_used, quota_limit, quota_remaining, bandwidth_bytes, updated_at
+            FROM api_quota
+        """)).fetchall()
 
     # Build daily rows keyed by date
     by_date = {}
@@ -81,14 +89,49 @@ def get_usage():
                 tout / 1_000_000 * CLAUDE_HAIKU_OUTPUT_COST_PER_M, 4
             )
 
-    brave_remaining = max(0, BRAVE_MONTHLY_LIMIT - monthly_totals["brave"])
-    brave_pct = round(monthly_totals["brave"] / BRAVE_MONTHLY_LIMIT * 100, 1)
+    # Cached quota from api_quota (Brave from response headers, others from last live fetch)
+    quota = {r[0]: {
+        "quota_used": r[1], "quota_limit": r[2], "quota_remaining": r[3],
+        "bandwidth_bytes": r[4], "updated_at": r[5],
+    } for r in quota_rows}
+
+    brave_quota = quota.get("brave", {})
+    brave_limit = brave_quota.get("quota_limit") or BRAVE_MONTHLY_LIMIT
+    brave_remaining = brave_quota.get("quota_remaining", max(0, brave_limit - monthly_totals["brave"]))
+    brave_used_live = brave_quota.get("quota_used", monthly_totals["brave"])
+    brave_pct = round(brave_used_live / brave_limit * 100, 1) if brave_limit else 0
+
+    # Determine which keys are configured (so dashboard can show correct badges)
+    has_webshare_key = bool(os.getenv("WEBSHARE_API_KEY", ""))
+    has_anthropic_admin_key = bool(os.getenv("ANTHROPIC_ADMIN_KEY", ""))
 
     return {
         "month": month,
         "monthly": monthly_totals,
-        "brave_limit": BRAVE_MONTHLY_LIMIT,
+        "brave_limit": brave_limit,
         "brave_remaining": brave_remaining,
+        "brave_used_live": brave_used_live,
         "brave_pct": brave_pct,
+        "brave_quota_updated_at": brave_quota.get("updated_at"),
+        "webshare_live": quota.get("webshare"),      # None if not yet fetched
+        "claude_live": quota.get("claude"),           # None if not yet fetched
+        "has_webshare_key": has_webshare_key,
+        "has_anthropic_admin_key": has_anthropic_admin_key,
         "daily": list(by_date.values()),
+    }
+
+
+@router.post("/refresh")
+def refresh_live_usage():
+    """
+    Trigger a live fetch from Webshare and Anthropic billing APIs.
+    Returns the fetched data (or null per service if key not configured).
+    """
+    webshare = fetch_webshare_live()
+    anthropic = fetch_anthropic_live()
+    return {
+        "webshare": webshare,
+        "anthropic": anthropic,
+        "webshare_key_set": bool(os.getenv("WEBSHARE_API_KEY", "")),
+        "anthropic_admin_key_set": bool(os.getenv("ANTHROPIC_ADMIN_KEY", "")),
     }

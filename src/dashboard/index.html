@@ -591,7 +591,10 @@
         <h2 style="font-size:16px;font-weight:700;color:#dff0d4">API Usage</h2>
         <p style="font-size:12px;color:#628a6a;margin-top:3px">Daily call counts for Brave Search API, Webshare proxy, and Claude API</p>
       </div>
-      <button class="btn-secondary btn-sm" onclick="loadUsage()">Refresh</button>
+      <div style="display:flex;gap:8px">
+        <button id="btn-refresh-live" class="btn-secondary btn-sm" onclick="refreshLiveUsage()">Refresh Live</button>
+        <button class="btn-secondary btn-sm" onclick="loadUsage()">Refresh</button>
+      </div>
     </div>
 
     <!-- Monthly summary cards -->

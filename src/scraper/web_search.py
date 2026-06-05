@@ -373,7 +373,9 @@ async def _brave_discover(titles, candidates, tracked_keys, tracked_names, proce
                     if resp.status_code != 200:
                         continue
                     from src.api.usage import record_brave
+                    from src.scraper.brave import _store_brave_quota
                     record_brave(calls=1)
+                    _store_brave_quota(resp.headers)
                     for result in resp.json().get("web", {}).get("results", []):
                         process_fn(result.get("url", ""))
     except Exception as e:
