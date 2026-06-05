@@ -99,6 +99,15 @@ def _migrate_db():
                 conn.execute(text(ddl))
                 conn.commit()
 
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """))
+        conn.commit()
+
         # Seed a single NotionConfig row if the table is empty
     with engine.connect() as conn:
         from src.api.models import NotionConfig  # noqa: F401 — ensure table exists

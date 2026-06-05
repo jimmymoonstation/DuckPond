@@ -16,6 +16,7 @@ def start_scheduler():
     from src.email.reader import run_email_sync
     from src.scraper.web_search import run_company_discovery
     from src.scraper.validator import run_validation
+    from src.api.routes.calendar import sync_calendar_interviews
 
     # Career page scrapers every 30 minutes (concurrent scrape takes ~1-2 min now)
     scheduler.add_job(
@@ -67,6 +68,15 @@ def start_scheduler():
         run_validation,
         trigger=CronTrigger(hour="1,5,9,13,17,21", minute=0, timezone=PT),
         id="job_validator",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Google Calendar interview sync — every 2 hours
+    scheduler.add_job(
+        sync_calendar_interviews,
+        trigger=IntervalTrigger(hours=2),
+        id="calendar_sync",
         replace_existing=True,
         max_instances=1,
     )
