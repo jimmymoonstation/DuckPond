@@ -128,7 +128,7 @@ def run_email_sync() -> dict:
         # ── IMAP connect ─────────────────────────────────────────────────────
         mail = imaplib.IMAP4_SSL(HOST, PORT)
         mail.login(EMAIL, PASSWORD)
-        mail.select("INBOX")
+        mail.select("INBOX", readonly=True)
 
         # Search last 60 days
         status, data = mail.search(None, "SINCE", "01-Apr-2026")
