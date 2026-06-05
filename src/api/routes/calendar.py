@@ -143,11 +143,12 @@ def sync_calendar_interviews() -> dict:
     if not access_token:
         return {"error": "Google Calendar not connected", "created": 0}
 
-    # Fetch events for the next 60 days
-    now  = datetime.now(timezone.utc)
-    end  = now + timedelta(days=60)
+    # Fetch events: past 30 days + next 60 days so we catch recent/ongoing interviews
+    now   = datetime.now(timezone.utc)
+    start = now - timedelta(days=30)
+    end   = now + timedelta(days=60)
     params = {
-        "timeMin":      now.isoformat(),
+        "timeMin":      start.isoformat(),
         "timeMax":      end.isoformat(),
         "singleEvents": "true",
         "orderBy":      "startTime",
@@ -155,7 +156,7 @@ def sync_calendar_interviews() -> dict:
     }
     try:
         resp = httpx.get(
-            f"{GOOGLE_CALENDAR_URL}/calendars/primary/events",
+            f"{GOOGLE_CALENDAR_URL}/calendars/hcliu.jimmy@gmail.com/events",
             headers={"Authorization": f"Bearer {access_token}"},
             params=params,
             timeout=15,
@@ -168,29 +169,36 @@ def sync_calendar_interviews() -> dict:
 
     _INTERVIEW_KEYWORDS = re.compile(
         r"\b(interview|phone\s+screen|screening|on.?site|technical|hiring|recruiter"
-        r"|zoom\s+call|video\s+call|meet(?:ing)?|chat)\b",
+        r"|zoom\s+call|video\s+call|virtual|meet(?:ing)?|chat|call)\b",
         re.IGNORECASE,
     )
 
     db = SessionLocal()
     try:
-        # Build lookup: normalized company name → list of (application_id, job)
+        # Build lookup: normalized company name → application_id
         apps = (
             db.query(Application, Job)
             .join(Job, Application.job_id == Job.id)
             .filter(Application.status.in_(["applied", "phone_screen", "interview"]))
             .all()
         )
-        company_map: dict[str, int] = {}
+        company_map: dict[str, int] = {}       # normalized name → app_id
+        domain_map:  dict[str, int] = {}       # domain keyword → app_id
         for app, job in apps:
-            key = re.sub(r"[^a-z0-9]", "", job.company_name.lower())
-            company_map[key] = app.id
+            norm = re.sub(r"[^a-z0-9]", "", job.company_name.lower())
+            company_map[norm] = app.id
+            # Build domain keyword: "Samara Living Inc" → "samara"
+            first_word = re.sub(r"[^a-z0-9]", "", job.company_name.lower().split()[0])
+            if len(first_word) >= 4:
+                domain_map[first_word] = app.id
 
         created = 0
         matched = []
         for event in events:
             title       = event.get("summary", "")
-            description = event.get("description", "") or ""
+            description = re.sub(r"<[^>]+>", " ", event.get("description", "") or "")
+            attendees   = [a.get("email", "") for a in event.get("attendees", [])]
+            organizer   = event.get("organizer", {}).get("email", "")
             text_blob   = title + " " + description
 
             if not _INTERVIEW_KEYWORDS.search(text_blob):
@@ -210,14 +218,42 @@ def sync_calendar_interviews() -> dict:
             except Exception:
                 continue
 
-            # Match event to an application by company name appearing in title/description
+            # Platforms that appear in calendar events but aren't companies
+            _PLATFORM_DOMAINS = {
+                "google", "gmail", "zoom", "linkedin", "calendly", "microsoft",
+                "teams", "webex", "whereby", "meet", "notion", "slack", "greenhouse",
+                "lever", "ashby", "workday", "smartrecruiters",
+            }
+
+            # Match 1: company name in event title only (descriptions are full of
+            # Google Meet links, LinkedIn URLs, etc. that cause false positives)
             app_id = None
             matched_company = None
+            norm_title = re.sub(r"[^a-z0-9]", "", title.lower())
             for norm_name, aid in company_map.items():
-                if norm_name and norm_name in re.sub(r"[^a-z0-9]", "", text_blob.lower()):
+                if norm_name and len(norm_name) >= 4 and norm_name not in _PLATFORM_DOMAINS and norm_name in norm_title:
                     app_id = aid
                     matched_company = norm_name
                     break
+
+            # Match 2: non-platform attendee/organizer email domain → company first word
+            if not app_id:
+                all_emails = attendees + [organizer]
+                for email_addr in all_emails:
+                    if not email_addr or "@" not in email_addr:
+                        continue
+                    domain = email_addr.split("@")[-1].lower()
+                    domain_norm = re.sub(r"[^a-z0-9]", "", domain)
+                    # Skip platform/calendar service domains
+                    if any(plat in domain_norm for plat in _PLATFORM_DOMAINS):
+                        continue
+                    for keyword, aid in domain_map.items():
+                        if keyword and keyword in domain_norm:
+                            app_id = aid
+                            matched_company = f"{keyword} (via email domain)"
+                            break
+                    if app_id:
+                        break
 
             if not app_id:
                 logger.debug(f"Calendar event not matched to any app: {title!r}")
