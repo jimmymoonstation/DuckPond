@@ -78,6 +78,94 @@ def _get_body(msg) -> str:
     return body[:3000]
 
 
+def _extract_ical_date(msg) -> datetime | None:
+    """Look for a text/calendar MIME part and parse DTSTART from it."""
+    for part in msg.walk():
+        if part.get_content_type() not in ("text/calendar", "application/ics"):
+            continue
+        try:
+            ical_text = part.get_payload(decode=True).decode(
+                part.get_content_charset() or "utf-8", errors="replace"
+            )
+        except Exception:
+            continue
+
+        # DTSTART:20260610T140000Z  or  DTSTART;TZID=...:20260610T140000
+        m = re.search(r"DTSTART(?:;[^:]+)?:(\d{8}T\d{6})(Z?)", ical_text)
+        if m:
+            try:
+                dt_str = m.group(1)
+                dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S")
+                if m.group(2) == "Z":
+                    dt = dt.replace(tzinfo=timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                pass
+
+        # All-day event: DTSTART;VALUE=DATE:20260610
+        m = re.search(r"DTSTART;VALUE=DATE:(\d{8})", ical_text)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), "%Y%m%d")
+            except Exception:
+                pass
+    return None
+
+
+# Sentence patterns that strongly suggest a scheduled time
+_DATE_SENTENCE_RE = re.compile(
+    r"(?:scheduled|confirmed|set|booked|invite[d]?|meet(?:ing)?|interview|call|session)"
+    r".{0,120}?"
+    r"(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}"
+    r"|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}"
+    r"|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\w*\s+\w+\s+\d{1,2})"
+    r".{0,60}?(?:\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_body_date(body: str) -> datetime | None:
+    """Try to parse a scheduled interview datetime from email body text."""
+    from dateutil import parser as du_parser
+    from dateutil.parser import ParserError
+
+    # Only attempt parsing on sentences that look like scheduled times
+    matches = _DATE_SENTENCE_RE.findall(body)
+    for snippet in matches[:5]:
+        try:
+            dt = du_parser.parse(snippet, fuzzy=True, dayfirst=False)
+            # Sanity check: must be in the future relative to today and within 6 months
+            now = datetime.utcnow()
+            if now <= dt.replace(tzinfo=None) <= datetime(now.year + 1, now.month, now.day):
+                return dt.replace(tzinfo=None)
+        except (ParserError, OverflowError, ValueError):
+            continue
+    return None
+
+
+def _extract_interview_date(msg, body: str) -> datetime | None:
+    """ICS attachment first, then body text parsing."""
+    return _extract_ical_date(msg) or _extract_body_date(body)
+
+
+def _infer_round(subject: str, body: str) -> str:
+    """Guess the interview round from subject/body keywords."""
+    text = (subject + " " + body).lower()
+    if any(w in text for w in ["final", "last round", "last interview"]):
+        return "Final"
+    if any(w in text for w in ["onsite", "on-site", "on site", "loop"]):
+        return "Onsite"
+    if any(w in text for w in ["technical", "coding", "take-home", "take home", "assessment"]):
+        return "Technical"
+    if any(w in text for w in ["hiring manager", "manager round"]):
+        return "Hiring Manager"
+    if any(w in text for w in ["phone screen", "phone call", "recruiter", "initial"]):
+        return "Phone Screen"
+    if any(w in text for w in ["video", "zoom", "google meet", "teams"]):
+        return "Video Interview"
+    return "Interview"
+
+
 def run_email_sync() -> dict:
     """
     Connect to Gmail, read emails from the last 30 days, classify them,
@@ -231,13 +319,38 @@ def run_email_sync() -> dict:
                                     f"(via email: {subject[:60]})"
                                 )
 
-                        # Write timeline event for interview invitations detected by email
+                        # Write timeline event + create Interview row for interview emails
                         if category == "interview":
                             from src.api.routes.applications import _write_timeline_event
                             _write_timeline_event(
                                 db, app, "interview_invited",
                                 notes=subject[:200], source="email",
                             )
+
+                            interview_dt = _extract_interview_date(msg, body)
+                            if interview_dt:
+                                round_name = _infer_round(subject, body)
+                                # Only create if no existing interview on same day
+                                existing = db.execute(text("""
+                                    SELECT id FROM interviews
+                                    WHERE application_id = :app_id
+                                    AND DATE(scheduled_at) = DATE(:dt)
+                                """), {"app_id": app.id, "dt": interview_dt}).fetchone()
+                                if not existing:
+                                    db.execute(text("""
+                                        INSERT INTO interviews
+                                        (application_id, round, scheduled_at, notes)
+                                        VALUES (:app_id, :round, :dt, :notes)
+                                    """), {
+                                        "app_id": app.id,
+                                        "round":  round_name,
+                                        "dt":     interview_dt,
+                                        "notes":  f"Auto-detected from email: {subject[:200]}",
+                                    })
+                                    logger.info(
+                                        f"Created interview for app {app.id} "
+                                        f"({round_name}) on {interview_dt}"
+                                    )
 
                 # ── Save event ───────────────────────────────────────────────
                 db.execute(text("""
