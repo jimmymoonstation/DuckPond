@@ -43,6 +43,7 @@ An AI-powered job hunting system built for full-time job seekers on a deadline. 
 | [Scraper Design](docs/scraper.md) | ATS board clients, dedup strategy, validator |
 | [Discord Bot](docs/discord-bot.md) | Notification schedule, conversational mode |
 | [Deployment](docs/deployment.md) | nginx config, systemd services, DigitalOcean setup |
+| [Migration Plan](docs/migration.md) | Phased roadmap: Docker → Kafka → Flink → Trino → K8s, cost breakdown |
 
 ---
 
@@ -104,6 +105,8 @@ Default server: `http://143.198.134.85` — configurable in extension settings.
 
 ## Tech Stack
 
+### Current (Phase 0)
+
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.12, FastAPI, SQLAlchemy ORM, Pydantic v2 |
@@ -116,3 +119,35 @@ Default server: `http://143.198.134.85` — configurable in extension settings.
 | Extension | Manifest V3, chrome.scripting, chrome.storage |
 | Bot | discord.py |
 | Server | nginx reverse proxy, systemd, DigitalOcean SFO3 |
+
+### Target (Phase 6+)
+
+| Layer | Tech |
+|---|---|
+| Containers | Docker, k3s (Kubernetes) |
+| Event bus | Redpanda (Kafka-compatible) |
+| Stream processing | Apache Flink (PyFlink) |
+| OLTP database | PostgreSQL |
+| Object storage | MinIO (self-hosted S3) |
+| Table format | Apache Iceberg |
+| Analytics query layer | Trino |
+| Scheduling | Kubernetes CronJobs (replaces APScheduler) |
+
+All target-stack software is free and open-source. Only cost increase: DigitalOcean droplet upgrade ($6 → $48/mo for 8 GB RAM).
+
+---
+
+## Roadmap
+
+| Phase | Description | Status |
+|---|---|---|
+| Phase 0 | Single-process systemd app, SQLite | **Current** |
+| Phase 1 | Dockerize all services (Docker Compose) | Planned |
+| Phase 2 | Add Redpanda (Kafka event bus) + droplet upgrade | Planned |
+| Phase 3 | SQLite → PostgreSQL | Planned |
+| Phase 4 | Add Apache Flink (stateful stream processing) | Planned |
+| Phase 5 | Add MinIO + Apache Iceberg (data lake) | Planned |
+| Phase 6 | Add Trino (federated analytics queries) | Planned |
+| Phase 7 | docker-compose → k3s (Kubernetes) | Planned |
+
+See [Migration Plan](docs/migration.md) for detailed steps, rollback strategy, and cost breakdown per phase.

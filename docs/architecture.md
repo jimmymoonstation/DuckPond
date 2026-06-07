@@ -1,5 +1,8 @@
 # Architecture & System Design
 
+> **This document describes the current (Phase 0) architecture.**
+> For the planned evolution to Docker + Kubernetes + Kafka + Flink + Trino, see [Migration Plan](migration.md).
+
 ## System Overview
 
 ```
@@ -199,7 +202,46 @@ Every 60 min ── Learning pass (user feedback → preference update)
  21:00       ── Daily Discord report + job link validator pass
 ```
 
-## Deployment Topology (DigitalOcean SFO3)
+## Target Architecture (Phase 6+)
+
+The planned end state replaces the single-process deployment with a fully containerized, event-driven data platform. See [Migration Plan](migration.md) for step-by-step phases.
+
+```
+Scrapers / Email Reader (K8s CronJobs)
+        │ produce events
+        ▼
+  Redpanda (Kafka-compatible broker)
+  Topics: raw_jobs · raw_emails · job_events · email_events
+        │ consume + process
+        ▼
+  Apache Flink
+  Jobs: DeduplicateJobs · ClassifyEmails · NormalizeJobs
+      ↙                          ↘
+PostgreSQL (OLTP)          MinIO + Iceberg (data lake)
+jobs · applications        jobs_history · email_history
+email_events · interviews  application_snapshots (Parquet)
+      ↘                          ↙
+           Trino (query layer)
+           federated SQL over PostgreSQL + Iceberg
+                   ↓
+    FastAPI · Discord Bot · Dashboard (nginx ingress)
+```
+
+**Technology choices:**
+
+| Layer | Technology | Why |
+|---|---|---|
+| Container orchestration | k3s (lightweight K8s) | Full K8s API, single binary, no kubeadm overhead |
+| Event bus | Redpanda | Kafka-compatible, no ZooKeeper, simpler ops than Kafka |
+| Stream processor | Apache Flink (PyFlink) | Stateful deduplication, exactly-once, Python API |
+| OLTP database | PostgreSQL | Concurrent writes, transactions, production-grade |
+| Object storage | MinIO (self-hosted S3) | Free, S3-compatible, runs on same droplet |
+| Table format | Apache Iceberg | Schema evolution, time travel, Flink + Trino native |
+| Query engine | Trino | Federated SQL across PostgreSQL + Iceberg |
+
+All software is **free and open-source**. The only cost increase is the DigitalOcean droplet upgrade (1 GB → 8 GB RAM, ~$6 → $48/mo) needed to run this stack.
+
+## Current Deployment Topology (DigitalOcean SFO3)
 
 ```
 Internet (port 80/443)
