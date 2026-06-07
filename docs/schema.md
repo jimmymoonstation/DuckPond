@@ -1,5 +1,428 @@
 # Database Schema
 
+> This document covers both the **current single-user schema** (SQLite) and the **target multi-user schema** (PostgreSQL). See [Migration Plan](migration.md) for how to get from one to the other.
+
+---
+
+## Target Schema — Multi-User (PostgreSQL)
+
+### Design principles
+
+- `jobs` is a **global catalog** — one row per unique job posting, shared across all users. Deduplication is global.
+- `user_jobs` is the **per-user board** — a junction table linking users to jobs. All user-specific state (status, fit score, notes, feedback) lives here, not in `jobs`.
+- Every other user-scoped table (`resumes`, `search_config`, `email_events`) gains a `user_id` FK.
+- `tracked_companies` remains a global catalog (all users benefit from the same scraper targets). A `added_by_user_id` column tracks who added a company manually.
+
+### Import flow
+
+```
+User clicks "Import" in extension
+        │
+POST /api/jobs  { company_job_id, title, company, url, source, ... }
+Authorization: Bearer <user_api_key>
+        │
+FastAPI:
+  Step 1 — UPSERT into global catalog:
+    INSERT INTO jobs (...) ON CONFLICT (company_job_id, source) DO NOTHING
+    → already exists globally? no-op. new job? insert it.
+
+  Step 2 — Add to user's board:
+    INSERT INTO user_jobs (user_id, job_id, status='saved')
+    ON CONFLICT (user_id, job_id) DO NOTHING
+    → user already has it? no-op.
+
+  Step 3 — Return user_jobs row to extension
+```
+
+1000 users importing the same Stripe SWE role creates exactly **one row in `jobs`** and **one row per user in `user_jobs`**.
+
+### Entity Relationship Diagram (target)
+
+```mermaid
+erDiagram
+    users {
+        UUID     id PK
+        TEXT     email
+        TEXT     name
+        TEXT     api_key
+        DATETIME created_at
+        DATETIME last_active_at
+    }
+
+    jobs {
+        UUID     id PK
+        TEXT     company_job_id
+        TEXT     company_name
+        TEXT     job_title
+        TEXT     location
+        TEXT     level
+        TEXT     url
+        TEXT     original_url
+        TEXT     source
+        TEXT     description
+        DATETIME posted_at
+        DATETIME discovered_at
+        BOOLEAN  is_active
+    }
+
+    user_jobs {
+        UUID     id PK
+        UUID     user_id FK
+        UUID     job_id FK
+        TEXT     status
+        FLOAT    fit_score
+        TEXT     cover_letter_bullets
+        TEXT     user_feedback
+        TEXT     notes
+        DATETIME applied_at
+        DATETIME added_at
+    }
+
+    status_history {
+        UUID     id PK
+        UUID     user_job_id FK
+        TEXT     from_status
+        TEXT     to_status
+        DATETIME changed_at
+        TEXT     notes
+    }
+
+    interviews {
+        UUID     id PK
+        UUID     user_job_id FK
+        TEXT     round
+        DATETIME scheduled_at
+        TEXT     notes
+        TEXT     outcome
+        TEXT     prep_notes
+    }
+
+    resumes {
+        UUID     id PK
+        UUID     user_id FK
+        TEXT     name
+        TEXT     version
+        TEXT     tags
+        TEXT     content_json
+        TEXT     file_path
+        DATETIME created_at
+    }
+
+    search_config {
+        UUID     id PK
+        UUID     user_id FK
+        TEXT     titles_json
+        TEXT     locations_json
+        TEXT     levels_json
+        TEXT     keywords_json
+        TEXT     excluded_companies_json
+        BOOLEAN  is_active
+        DATETIME updated_at
+    }
+
+    tracked_companies {
+        UUID     id PK
+        TEXT     company_name
+        TEXT     ats_type
+        TEXT     ats_slug
+        TEXT     career_url
+        UUID     added_by_user_id FK
+        DATETIME added_at
+        BOOLEAN  is_active
+    }
+
+    email_events {
+        UUID     id PK
+        UUID     user_id FK
+        TEXT     message_id
+        DATETIME received_at
+        TEXT     from_address
+        TEXT     category
+        TEXT     company_name
+        UUID     linked_user_job_id FK
+        TEXT     snippet
+        DATETIME processed_at
+    }
+
+    discord_sessions {
+        UUID     id PK
+        UUID     user_id FK
+        TEXT     channel_id
+        TEXT     message_history_json
+        DATETIME last_active
+    }
+
+    users            ||--o{ user_jobs          : "board"
+    jobs             ||--o{ user_jobs          : "imported by"
+    user_jobs        ||--o{ status_history     : "audit trail"
+    user_jobs        ||--o{ interviews         : "interview rounds"
+    users            ||--o{ resumes            : "owns"
+    users            ||--o{ search_config      : "owns"
+    users            ||--o{ email_events       : "owns"
+    users            ||--o{ discord_sessions   : "owns"
+    user_jobs        ||--o{ email_events       : "linked email"
+```
+
+### Table Definitions (target — PostgreSQL)
+
+#### `users`
+
+```sql
+CREATE TABLE users (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         TEXT NOT NULL UNIQUE,
+    name          TEXT,
+    api_key       TEXT NOT NULL UNIQUE DEFAULT gen_random_uuid()::TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_active_at TIMESTAMPTZ
+);
+```
+
+The `api_key` is what the browser extension sends in the `Authorization` header. Simple and stateless — no session management needed.
+
+---
+
+#### `jobs` (global catalog)
+
+```sql
+CREATE TABLE jobs (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_job_id  TEXT NOT NULL,
+    company_name    TEXT NOT NULL,
+    job_title       TEXT NOT NULL,
+    location        TEXT,
+    level           TEXT,
+    url             TEXT NOT NULL,
+    original_url    TEXT,
+    source          TEXT NOT NULL,
+    description     TEXT,
+    posted_at       TIMESTAMPTZ,
+    discovered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+
+    UNIQUE(company_job_id, source)    -- global dedup constraint
+);
+
+CREATE INDEX idx_jobs_discovered  ON jobs(discovered_at DESC);
+CREATE INDEX idx_jobs_company     ON jobs(company_name);
+CREATE INDEX idx_jobs_active      ON jobs(is_active);
+```
+
+`user_feedback` and `fit_score` are **not** on this table — those are per-user and live in `user_jobs`.
+
+---
+
+#### `user_jobs` (per-user board)
+
+```sql
+CREATE TABLE user_jobs (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id               UUID NOT NULL REFERENCES jobs(id),
+    status               TEXT NOT NULL DEFAULT 'saved'
+                             CHECK(status IN (
+                                 'saved', 'applied', 'phone_screen',
+                                 'interview', 'offer', 'rejected', 'withdrawn'
+                             )),
+    fit_score            FLOAT,             -- Claude fit score (0–100), NULL if not analyzed
+    cover_letter_bullets TEXT,              -- JSON array of bullet strings from Claude
+    user_feedback        TEXT,              -- free-text feedback for learning pass
+    feedback_at          TIMESTAMPTZ,
+    notes                TEXT,
+    applied_at           TIMESTAMPTZ,       -- NULL when status='saved'
+    added_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(user_id, job_id)                 -- one board entry per user per job
+);
+
+CREATE INDEX idx_user_jobs_user    ON user_jobs(user_id);
+CREATE INDEX idx_user_jobs_status  ON user_jobs(user_id, status);
+CREATE INDEX idx_user_jobs_added   ON user_jobs(user_id, added_at DESC);
+```
+
+---
+
+#### `status_history`
+
+```sql
+CREATE TABLE status_history (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_job_id  UUID NOT NULL REFERENCES user_jobs(id) ON DELETE CASCADE,
+    from_status  TEXT,
+    to_status    TEXT NOT NULL,
+    changed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    notes        TEXT
+);
+```
+
+---
+
+#### `interviews`
+
+```sql
+CREATE TABLE interviews (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_job_id  UUID NOT NULL REFERENCES user_jobs(id) ON DELETE CASCADE,
+    round        TEXT NOT NULL
+                     CHECK(round IN (
+                         'phone_screen', 'technical', 'behavioral',
+                         'system_design', 'take_home', 'final', 'other'
+                     )),
+    scheduled_at TIMESTAMPTZ,
+    notes        TEXT,
+    outcome      TEXT CHECK(outcome IN ('passed', 'failed', 'pending', 'cancelled')),
+    prep_notes   TEXT
+);
+```
+
+---
+
+#### `resumes`
+
+```sql
+CREATE TABLE resumes (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    version      TEXT,
+    tags         TEXT DEFAULT '[]',
+    content_json TEXT DEFAULT '{}',
+    file_path    TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+---
+
+#### `search_config`
+
+```sql
+CREATE TABLE search_config (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    titles_json             TEXT NOT NULL DEFAULT '[]',
+    locations_json          TEXT NOT NULL DEFAULT '[]',
+    levels_json             TEXT NOT NULL DEFAULT '[]',
+    keywords_json           TEXT NOT NULL DEFAULT '[]',
+    excluded_companies_json TEXT NOT NULL DEFAULT '[]',
+    is_active               BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+---
+
+#### `tracked_companies` (global catalog)
+
+```sql
+CREATE TABLE tracked_companies (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_name      TEXT NOT NULL,
+    ats_type          TEXT NOT NULL,
+    ats_slug          TEXT NOT NULL,
+    workday_board     TEXT,
+    workday_wd_ver    TEXT DEFAULT 'wd5',
+    career_url        TEXT,
+    discovered_from   TEXT NOT NULL DEFAULT 'manual',
+    added_by_user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- NULL = added by system (seed/auto-discovery)
+    added_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE
+);
+```
+
+---
+
+#### `email_events`
+
+```sql
+CREATE TABLE email_events (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message_id          TEXT NOT NULL,
+    received_at         TIMESTAMPTZ,
+    from_address        TEXT,
+    from_name           TEXT,
+    subject             TEXT,
+    category            TEXT NOT NULL DEFAULT 'other',
+    company_name        TEXT,
+    job_title           TEXT,
+    linked_user_job_id  UUID REFERENCES user_jobs(id) ON DELETE SET NULL,
+    snippet             TEXT,
+    processed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(user_id, message_id)   -- dedup per user
+);
+
+CREATE INDEX idx_email_events_user     ON email_events(user_id, received_at DESC);
+CREATE INDEX idx_email_events_category ON email_events(user_id, category);
+```
+
+---
+
+#### `discord_sessions`
+
+```sql
+CREATE TABLE discord_sessions (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              UUID REFERENCES users(id) ON DELETE CASCADE,
+    channel_id           TEXT NOT NULL UNIQUE,
+    message_history_json TEXT NOT NULL DEFAULT '[]',
+    last_active          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+---
+
+### What moved where
+
+| Current column | Current table | Moved to |
+|---|---|---|
+| `user_feedback` | `jobs` | `user_jobs` |
+| `feedback_at` | `jobs` | `user_jobs` |
+| `fit_score` | nowhere (returned by API, not stored) | `user_jobs` |
+| `cover_letter_bullets` | nowhere (returned by API, not stored) | `user_jobs` |
+| `application_id` FK | `status_history`, `interviews`, `email_events` | `user_job_id` FK |
+| `linked_application_id` | `email_events` | `linked_user_job_id` |
+
+---
+
+### Kafka event schema (multi-user)
+
+All events flowing through Redpanda carry `user_id` so Flink can partition correctly:
+
+```json
+// raw_jobs topic — produced by scrapers (no user) and extension (with user)
+{
+  "user_id": "abc123",          // null for scraper-produced events
+  "company_job_id": "gh:stripe:98765",
+  "company_name": "Stripe",
+  "job_title": "Senior Data Engineer",
+  "source": "greenhouse",
+  "url": "https://...",
+  "discovered_at": "2026-06-07T10:00:00Z"
+}
+
+// user_job_events topic — produced when a user imports a job
+{
+  "user_id": "abc123",
+  "job_id": "uuid-of-job-in-global-catalog",
+  "action": "import",           // import | status_change | analyze
+  "status": "saved",
+  "fit_score": null,
+  "timestamp": "2026-06-07T10:00:05Z"
+}
+```
+
+Flink partitions `raw_jobs` by `company_job_id` (for global dedup) and `user_job_events` by `user_id` (for per-user ordering).
+
+---
+
+## Current Schema — Single User (SQLite)
+
+> The schema below is the live schema as of Phase 0. It will be replaced by the target schema above during Phase 3 (SQLite → PostgreSQL) of the [migration plan](migration.md).
+
 SQLite database at `/opt/job-hunt-partner/jobs.db`.
 
 ---

@@ -194,19 +194,41 @@ email_events ← classified emails (consumer publishes after classify)
 
 ---
 
-### Phase 3 — Replace SQLite with PostgreSQL
+### Phase 3 — Replace SQLite with PostgreSQL + Multi-User Schema
 
-**Goal:** Move from SQLite single-writer to PostgreSQL, which supports concurrent writes and is production-grade.
+**Goal:** Move from SQLite single-writer to PostgreSQL with the full multi-user schema. This is the biggest structural change — see [Database Schema](schema.md) for the complete target DDL.
 
-**What changes:**
+**Key schema changes:**
+- New `users` table — each user has an `api_key` for extension auth
+- `jobs` becomes a **global catalog** — user-specific fields (`user_feedback`, `fit_score`) removed
+- New `user_jobs` junction table — per-user board, links `users` → `jobs`
+  - `UNIQUE(user_id, job_id)` — one board entry per user per job
+  - Holds status, fit_score, cover_letter_bullets, notes, applied_at
+- `status_history`, `interviews`, `email_events` — FKs updated from `application_id` to `user_job_id`
+- `resumes`, `search_config`, `email_events`, `discord_sessions` — gain `user_id` FK
+- All PKs upgrade from `INTEGER AUTOINCREMENT` to `UUID` (safe for distributed inserts)
+
+**Import flow (new):**
+```sql
+-- Step 1: global dedup insert (safe for concurrent calls)
+INSERT INTO jobs (company_job_id, source, title, company, url, ...)
+VALUES (...)
+ON CONFLICT (company_job_id, source) DO NOTHING;
+
+-- Step 2: add to user's board
+INSERT INTO user_jobs (user_id, job_id, status)
+SELECT $user_id, id, 'saved' FROM jobs
+WHERE company_job_id = $company_job_id AND source = $source
+ON CONFLICT (user_id, job_id) DO NOTHING;
+```
+
+**What changes in code:**
 - Add `postgres` container to docker-compose
-- Migrate schema from SQLite DDL to PostgreSQL DDL
+- Migrate schema: run target DDL from `schema.md` against PostgreSQL
 - Update `DATABASE_URL` env var from `sqlite:///` to `postgresql://`
-- SQLAlchemy handles the rest (minimal code changes)
-- Run `init_db.py` against PostgreSQL
-- One-time data migration: `sqlite3 jobs.db .dump | psql`
-
-**Why now (before Flink):** PostgreSQL is the permanent OLTP store. Flink will write to it in Phase 4 — better to have it running and validated first.
+- Update all SQLAlchemy models to match new table structure
+- Add `user_id` extraction from `Authorization: Bearer <api_key>` header in FastAPI
+- One-time data migration: export existing SQLite data → import as user_id=`system_user`
 
 **Cost:** No change ($48/mo — PostgreSQL runs on same droplet)
 
