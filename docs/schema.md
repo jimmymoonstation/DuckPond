@@ -70,12 +70,24 @@ erDiagram
         UUID     user_id FK
         UUID     job_id FK
         TEXT     status
-        FLOAT    fit_score
-        TEXT     cover_letter_bullets
-        TEXT     user_feedback
-        TEXT     notes
         DATETIME applied_at
         DATETIME added_at
+    }
+
+    user_job_analysis {
+        UUID     user_job_id PK
+        FLOAT    fit_score
+        TEXT     cover_letter_bullets
+        TEXT     strengths
+        TEXT     gaps
+        DATETIME analyzed_at
+    }
+
+    user_job_notes {
+        UUID     user_job_id PK
+        TEXT     notes
+        TEXT     feedback
+        DATETIME updated_at
     }
 
     status_history {
@@ -154,6 +166,8 @@ erDiagram
 
     users            ||--o{ user_jobs          : "board"
     jobs             ||--o{ user_jobs          : "imported by"
+    user_jobs        ||--|| user_job_analysis  : "analysis (optional)"
+    user_jobs        ||--|| user_job_notes     : "notes (optional)"
     user_jobs        ||--o{ status_history     : "audit trail"
     user_jobs        ||--o{ interviews         : "interview rounds"
     users            ||--o{ resumes            : "owns"
@@ -212,32 +226,61 @@ CREATE INDEX idx_jobs_active      ON jobs(is_active);
 
 ---
 
-#### `user_jobs` (per-user board)
+#### `user_jobs` (per-user board — lean hot table)
+
+Intentionally minimal. Only the fields needed on every board load. Heavy data (analysis, notes) lives in satellite tables that are only read when explicitly requested.
 
 ```sql
 CREATE TABLE user_jobs (
-    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    job_id               UUID NOT NULL REFERENCES jobs(id),
-    status               TEXT NOT NULL DEFAULT 'saved'
-                             CHECK(status IN (
-                                 'saved', 'applied', 'phone_screen',
-                                 'interview', 'offer', 'rejected', 'withdrawn'
-                             )),
-    fit_score            FLOAT,             -- Claude fit score (0–100), NULL if not analyzed
-    cover_letter_bullets TEXT,              -- JSON array of bullet strings from Claude
-    user_feedback        TEXT,              -- free-text feedback for learning pass
-    feedback_at          TIMESTAMPTZ,
-    notes                TEXT,
-    applied_at           TIMESTAMPTZ,       -- NULL when status='saved'
-    added_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id     UUID NOT NULL REFERENCES jobs(id),
+    status     TEXT NOT NULL DEFAULT 'saved'
+                   CHECK(status IN (
+                       'saved', 'applied', 'phone_screen',
+                       'interview', 'offer', 'rejected', 'withdrawn'
+                   )),
+    applied_at TIMESTAMPTZ,
+    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    UNIQUE(user_id, job_id)                 -- one board entry per user per job
+    UNIQUE(user_id, job_id)
 );
 
 CREATE INDEX idx_user_jobs_user    ON user_jobs(user_id);
 CREATE INDEX idx_user_jobs_status  ON user_jobs(user_id, status);
 CREATE INDEX idx_user_jobs_added   ON user_jobs(user_id, added_at DESC);
+```
+
+Each row is ~60 bytes. 50 million rows (100k users × 500 jobs each) = ~3 GB. Queries never touch analysis data unless the user opens a specific job.
+
+---
+
+#### `user_job_analysis` (satellite — created only on "Analyze" click)
+
+```sql
+CREATE TABLE user_job_analysis (
+    user_job_id          UUID PRIMARY KEY REFERENCES user_jobs(id) ON DELETE CASCADE,
+    fit_score            FLOAT,
+    cover_letter_bullets TEXT,   -- JSON array of bullet strings from Claude
+    strengths            TEXT,   -- JSON array
+    gaps                 TEXT,   -- JSON array
+    analyzed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Not every user analyzes every job. A user who saves 500 jobs but only analyzes 20 stores exactly 20 rows here. The other 480 `user_jobs` rows are never touched by this table.
+
+---
+
+#### `user_job_notes` (satellite — created only when user writes something)
+
+```sql
+CREATE TABLE user_job_notes (
+    user_job_id  UUID PRIMARY KEY REFERENCES user_jobs(id) ON DELETE CASCADE,
+    notes        TEXT,
+    feedback     TEXT,   -- free-text feedback for learning pass
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
 
 ---
@@ -375,14 +418,62 @@ CREATE TABLE discord_sessions (
 
 ---
 
+### Future Plan: Hot/Cold Tiering
+
+> **Status: planned — implement after Phase 5 (MinIO + Iceberg) is stable.**
+
+Even with the lean `user_jobs` table, rows accumulate over time. A user who's been on the platform for a year has hundreds of rejected/withdrawn jobs sitting in PostgreSQL, participating in every index scan. At 100k users, that could be tens of millions of dead rows.
+
+**The fix:** a nightly Flink archival job moves cold rows from PostgreSQL into an Iceberg table on MinIO. PostgreSQL stays lean; Trino can still query the full history.
+
+```
+PostgreSQL (hot — active jobs only):
+  user_jobs WHERE status IN ('saved','applied','phone_screen','interview','offer')
+  AND added_at > NOW() - INTERVAL '90 days'
+
+Iceberg on MinIO (cold archive — full history):
+  archived_user_jobs  (all rejected/withdrawn/old entries)
+  archived_user_job_analysis
+  archived_user_job_notes
+
+Flink archival job (runs nightly at 03:00):
+  Reads from PostgreSQL:
+    WHERE status IN ('rejected', 'withdrawn')
+    OR added_at < NOW() - INTERVAL '90 days'
+  Writes to Iceberg (append)
+  Deletes from PostgreSQL
+```
+
+**What this means in practice:**
+
+| Query | Hits |
+|---|---|
+| Show my board (active jobs) | PostgreSQL only — fast |
+| Update status | PostgreSQL only — fast |
+| "How many rejections this year?" | Trino → Iceberg — analytical, not latency-sensitive |
+| "Show full history for a job" | Trino → PostgreSQL + Iceberg (federated join) |
+
+The 90-day window is configurable per user. Users can opt into longer hot retention if they want.
+
+**Storage estimate after tiering:**
+
+| Store | Content | Estimated size (100k users) |
+|---|---|---|
+| PostgreSQL `user_jobs` | Active jobs only (~10% of total) | ~300 MB |
+| Iceberg `archived_user_jobs` | Full history (compressed Parquet) | ~2–5 GB |
+| `user_job_analysis` (PG) | Only active + unarchived | ~500 MB |
+
+---
+
 ### What moved where
 
 | Current column | Current table | Moved to |
 |---|---|---|
-| `user_feedback` | `jobs` | `user_jobs` |
-| `feedback_at` | `jobs` | `user_jobs` |
-| `fit_score` | nowhere (returned by API, not stored) | `user_jobs` |
-| `cover_letter_bullets` | nowhere (returned by API, not stored) | `user_jobs` |
+| `user_feedback` | `jobs` | `user_job_notes.feedback` |
+| `feedback_at` | `jobs` | `user_job_notes.updated_at` |
+| `fit_score` | nowhere (returned by API, not stored) | `user_job_analysis.fit_score` |
+| `cover_letter_bullets` | nowhere (returned by API, not stored) | `user_job_analysis.cover_letter_bullets` |
+| `notes` | `applications` | `user_job_notes.notes` |
 | `application_id` FK | `status_history`, `interviews`, `email_events` | `user_job_id` FK |
 | `linked_application_id` | `email_events` | `linked_user_job_id` |
 
