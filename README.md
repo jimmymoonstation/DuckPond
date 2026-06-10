@@ -81,6 +81,17 @@ systemctl start job-hunter
 
 Dashboard is live at `http://<your-server-ip>/jobs-dashboard`.
 
+### Optional cloud services
+
+These unlock additional features but aren't required to run:
+
+| Key | Feature | Where to get it |
+|---|---|---|
+| `WEB_SEARCH_PROXY` + `WEBSHARE_API_KEY` | Proxy fallback when DDG rate-limits your server IP | [webshare.io](https://www.webshare.io/) — paid, ~$4/mo for starter |
+| `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` | Syncs interview events from Google Calendar | [console.cloud.google.com](https://console.cloud.google.com/) → APIs & Services → Credentials → OAuth 2.0 Client ID (Desktop app) |
+| `ANTHROPIC_API_KEY` | Discord coaching via the Anthropic API directly | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) — note: if set, Claude Code subprocesses bill against this key |
+| `ANTHROPIC_ADMIN_KEY` | Live token usage stats in the dashboard | Same console — Admin Keys section (org accounts only) |
+
 ---
 
 ## Dashboard
