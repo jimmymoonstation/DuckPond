@@ -15,7 +15,26 @@ from src.api.models import Resume
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_BIN = "/home/claudebot/.vscode-server/extensions/anthropic.claude-code-2.1.109-linux-x64/resources/native-binary/claude"
+def _find_claude_bin() -> str:
+    import os, glob, shutil
+    # 1. explicit env override
+    if (v := os.getenv("CLAUDE_BIN")):
+        return v
+    # 2. npm-installed claude on PATH for claudebot
+    if (p := shutil.which("claude", path="/home/claudebot/.local/bin:/home/claudebot/bin:/usr/local/bin:/usr/bin")):
+        return p
+    # 3. VSCode Server extension (any version)
+    matches = sorted(glob.glob("/home/claudebot/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude"))
+    if matches:
+        return matches[-1]
+    # 4. root VSCode Server fallback
+    matches = sorted(glob.glob("/root/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude"))
+    if matches:
+        return matches[-1]
+    return "claude"  # last resort: hope it's on PATH
+
+
+CLAUDE_BIN = _find_claude_bin()
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 

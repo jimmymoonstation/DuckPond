@@ -47,28 +47,39 @@ An AI-powered job hunting system built for full-time job seekers on a deadline. 
 
 ---
 
-## Quick Start
+## Deploy on a new server
+
+Fresh Ubuntu 22.04 or 24.04 server (root access required). Takes about 5 minutes.
 
 ```bash
-# 1. Clone
-git clone https://github.com/jimmymoonstation/job-hunt-partner
-cd job-hunt-partner
-pip install -r requirements.txt
-
-# 2. Environment
-cp .env.example .env
-# Fill in: BRAVE_API_KEY, DISCORD_BOT_TOKEN, GMAIL_ADDRESS, GMAIL_APP_PASSWORD, ANTHROPIC_API_KEY
-
-# 3. Database
-python scripts/init_db.py
-python seed_companies.py   # seeds ~200 tracked companies
-
-# 4. Run locally
-uvicorn src.api.main:app --reload --port 5057
-
-# 5. Deploy
-bash scripts/deploy.sh
+git clone https://github.com/jimmymoonstation/DuckPond.git /opt/job-hunt-partner
+bash /opt/job-hunt-partner/scripts/setup.sh
 ```
+
+The script installs all dependencies, seeds 200+ companies, configures nginx and systemd, and prints exactly what to do next. After it finishes, two manual steps:
+
+**1. Fill in your keys** (`nano /opt/job-hunt-partner/.env`):
+
+| Key | Where to get it |
+|---|---|
+| `BRAVE_API_KEY` | [brave.com/search/api](https://brave.com/search/api/) — free, 2k req/month |
+| `DISCORD_BOT_TOKEN` | [discord.com/developers/applications](https://discord.com/developers/applications) |
+| `JOB_HUNT_CHANNEL_ID` | Right-click a channel in Discord → Copy Channel ID |
+| `EMAIL_ADDRESS` | Your Gmail address |
+| `EMAIL_APP_PASSWORD` | [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (requires 2FA on) |
+
+**2. Authenticate Claude Code** (powers the browser extension's Analyze button):
+```bash
+runuser -u claudebot -- claude auth login
+# follow the browser link it prints, then sign into claude.ai
+```
+
+**Then start everything:**
+```bash
+systemctl start job-hunter
+```
+
+Dashboard is live at `http://<your-server-ip>/jobs-dashboard`.
 
 ---
 
