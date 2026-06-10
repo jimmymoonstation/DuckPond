@@ -131,13 +131,19 @@ def _make_job_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:20]
 
 
-_ddg_failures = 0        # consecutive failure counter
-_DDG_FAILURE_LIMIT = 3   # trip the breaker after this many consecutive timeouts
+_direct_failures = 0    # consecutive no-proxy failures
+_proxy_failures = 0     # consecutive proxy failures
+_proxy_disabled = False  # proxy quota exceeded or repeated failures
+
+_DDG_FAILURE_LIMIT = 3
+_PROXY_FAILURE_LIMIT = 3
 
 
 def reset_ddg_circuit():
-    global _ddg_failures
-    _ddg_failures = 0
+    global _direct_failures, _proxy_failures, _proxy_disabled
+    _direct_failures = 0
+    _proxy_failures = 0
+    _proxy_disabled = False
 
 
 def _get_proxy() -> str | None:
@@ -146,30 +152,51 @@ def _get_proxy() -> str | None:
 
 
 def _ddg_text(query: str, max_results: int = 15) -> list[dict]:
-    """Synchronous DDG text search with proxy support and circuit breaker."""
-    global _ddg_failures
+    """DDG search: try direct first, fall back to proxy, disable proxy if quota exceeded."""
+    global _direct_failures, _proxy_failures, _proxy_disabled
     import time
+    from ddgs import DDGS
 
-    if _ddg_failures >= _DDG_FAILURE_LIMIT:
+    # ── 1. Try direct (no proxy) unless circuit breaker tripped ───────────
+    if _direct_failures < _DDG_FAILURE_LIMIT:
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+            _direct_failures = 0
+            time.sleep(0.5)
+            return results
+        except Exception as e:
+            _direct_failures += 1
+            if _direct_failures >= _DDG_FAILURE_LIMIT:
+                logger.warning("DDG direct circuit open — switching to proxy for remaining searches this run")
+            else:
+                logger.debug(f"DDG direct failed ({_direct_failures}/{_DDG_FAILURE_LIMIT}): {e}")
+
+    # ── 2. Fall back to proxy ──────────────────────────────────────────────
+    proxy = _get_proxy()
+    if not proxy or _proxy_disabled or _proxy_failures >= _PROXY_FAILURE_LIMIT:
         return []
 
     try:
-        from ddgs import DDGS
-        proxy = _get_proxy()
         with DDGS(proxy=proxy) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        _ddg_failures = 0
+        _proxy_failures = 0
+        _direct_failures = 0  # direct may recover after a delay
         time.sleep(0.5)
-        if proxy and results is not None:
-            from src.api.usage import record_webshare
-            record_webshare(calls=1)
+        from src.api.usage import record_webshare
+        record_webshare(calls=1)
         return results
     except Exception as e:
-        _ddg_failures += 1
-        if _ddg_failures >= _DDG_FAILURE_LIMIT:
-            logger.warning(f"DDG circuit breaker tripped after {_DDG_FAILURE_LIMIT} consecutive failures — skipping remaining web searches this run")
+        _proxy_failures += 1
+        err_str = str(e)
+        if any(tok in err_str for tok in ("407", "402", "bandwidth", "quota", "exceeded", "limit")):
+            _proxy_disabled = True
+            logger.warning(f"Webshare quota exceeded — proxy disabled for this run: {e}")
+        elif _proxy_failures >= _PROXY_FAILURE_LIMIT:
+            _proxy_disabled = True
+            logger.warning(f"Webshare proxy tripped after {_PROXY_FAILURE_LIMIT} failures — disabled for this run")
         else:
-            logger.warning(f"DDG search failed for '{query}': {e}")
+            logger.debug(f"DDG proxy failed ({_proxy_failures}/{_PROXY_FAILURE_LIMIT}): {e}")
         return []
 
 

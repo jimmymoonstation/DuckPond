@@ -147,9 +147,11 @@ def _call_claude(job_text: str, resume_text: str, url: str) -> AnalyzeResult:
     """).strip()
 
     try:
+        env = {k: v for k, v in __import__("os").environ.items() if k != "ANTHROPIC_API_KEY"}
         result = subprocess.run(
             ["runuser", "-u", "claudebot", "--", CLAUDE_BIN, "-p", prompt, "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=60,
+            env=env,
         )
         raw = result.stdout.strip()
 
