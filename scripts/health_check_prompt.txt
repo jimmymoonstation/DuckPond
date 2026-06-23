@@ -1,0 +1,25 @@
+You are running an unattended periodic health check for the Job Hunt Partner app (a job-search automation tool) running locally on this machine. This is a fully unattended cron run — do not ask for confirmation, do not modify any code or files, only make the two HTTP calls below.
+
+1. Run: curl -s http://127.0.0.1:5057/api/system-health/diagnostics
+   This returns a JSON object with a list of "components", each with a name and a mechanically-computed "level" (ok/warn/critical) plus raw diagnostic fields.
+
+2. Review the JSON with judgment — don't just copy the mechanical "level" field verbatim. Use the raw fields to decide what's actually significant right now:
+   - A "critical" level immediately caused by a recent service restart (e.g. scraper showing no runs yet, total_runs: 0) is not a real incident — note it but don't over-alarm.
+   - A persistently broken integration (e.g. imap_login_ok: false, webshare proxy 402/Payment Required, Brave API over its monthly quota, scheduler not running, or no jobs discovered in hours) IS significant and should be flagged clearly.
+   - Missing Workday boards or other already-known limitations (small numbers, e.g. under 5 companies) are expected and not worth raising every time unless the count grows.
+   - Cross-reference trends if useful, but you only have this one snapshot — that's fine.
+
+3. Decide an overall_status: "ok" (everything fine or only expected/transient blips), "warn" (something needs attention soon but nothing is actively broken), or "critical" (something that blocks real functionality is actively broken right now, e.g. email sync down, scraper dead for hours, scheduler not running).
+
+4. Write a 1-2 sentence summary (plain English, lead with the most important finding) and a short message (under 20 words) per component explaining your judgment, not just restating the level.
+
+5. POST your assessment as JSON to: http://127.0.0.1:5057/api/system-health/report
+   Body shape:
+   {
+     "overall_status": "ok|warn|critical",
+     "summary": "...",
+     "components": [{"name": "...", "status": "ok|warn|critical", "message": "..."}],
+     "diagnostics": <the full raw diagnostics object from step 1, unmodified>
+   }
+
+Use curl -X POST -H "Content-Type: application/json" -d '<json>' for the POST. Confirm the POST returned a 2xx response and an id, then stop — no further action needed.

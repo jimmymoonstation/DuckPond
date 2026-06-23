@@ -7,7 +7,7 @@ import imaplib
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
 
@@ -209,8 +209,8 @@ def run_email_sync() -> dict:
     """
     from sqlalchemy import text
     from src.api.database import SessionLocal
-    from src.api.models import Application, Job, TrackedCompany
-    from src.email.classifier import classify, extract_company, extract_job_title
+    from src.api.models import Application, Job, StatusHistory, TrackedCompany
+    from src.email.classifier import classify, extract_company, extract_job_title, _JOB_SENDER_DOMAINS
 
     EMAIL    = os.getenv("EMAIL_ADDRESS", "")
     PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "").replace(" ", "")
@@ -253,8 +253,10 @@ def run_email_sync() -> dict:
         mail.login(EMAIL, PASSWORD)
         mail.select("INBOX", readonly=True)
 
-        # Search last 60 days
-        status, data = mail.search(None, "SINCE", "01-Apr-2026")
+        # Search a rolling window so the cutoff never goes stale.
+        sync_days = int(os.getenv("EMAIL_SYNC_DAYS", "90"))
+        since_date = (datetime.utcnow() - timedelta(days=sync_days)).strftime("%d-%b-%Y")
+        status, data = mail.search(None, "SINCE", since_date)
         if status != "OK":
             return {"error": "IMAP search failed"}
 
@@ -337,16 +339,27 @@ def run_email_sync() -> dict:
                         .all()
                     )
                     if apps:
-                        linked_app_id = apps[-1].id
+                        # Prefer the most recently *active* application for this
+                        # company over the most recently *created* one — otherwise
+                        # a new application at a company silently steals every
+                        # subsequent email meant for an older, still-active thread.
+                        non_terminal = [a for a in apps if a.status not in ("rejected", "withdrawn")]
+                        app = max(non_terminal or apps, key=lambda a: a.updated_at or datetime.min)
+                        linked_app_id = app.id
 
                         new_status = _CATEGORY_TO_STATUS.get(category)
                         if new_status:
-                            app = apps[-1]
                             current_priority = _STATUS_PRIORITY.get(app.status, 0)
                             new_priority     = _STATUS_PRIORITY.get(new_status, 0)
                             # Only advance forward in the pipeline, never go backward
                             # Exception: rejection can always set rejected (terminal state)
                             if new_status == "rejected" or new_priority > current_priority:
+                                db.add(StatusHistory(
+                                    application_id=app.id,
+                                    from_status=app.status,
+                                    to_status=new_status,
+                                    notes=f"email: {subject[:180]}",
+                                ))
                                 app.status = new_status
                                 summary["status_updates"] += 1
                                 logger.info(
@@ -386,6 +399,21 @@ def run_email_sync() -> dict:
                                         f"Created interview for app {app.id} "
                                         f"({round_name}) on {interview_dt}"
                                     )
+                                    _write_timeline_event(
+                                        db, app, "interview_scheduled",
+                                        notes=f"{round_name}: {subject[:180]}", source="email",
+                                    )
+
+                        # Recruiter follow-ups during an active interview pipeline are
+                        # a checkpoint worth recording, even though they don't change status
+                        elif category == "recruiter" and app.status in (
+                            "phone_screen", "interview",
+                        ):
+                            from src.api.routes.applications import _write_timeline_event
+                            _write_timeline_event(
+                                db, app, "follow_up_received",
+                                notes=subject[:200], source="email",
+                            )
 
                 # ── Save event ───────────────────────────────────────────────
                 db.execute(text("""
@@ -412,11 +440,15 @@ def run_email_sync() -> dict:
                 summary["new_events"] += 1
                 summary["categories"][category] = summary["categories"].get(category, 0) + 1
 
+                # Commit per-message: a failure on a later email must not roll
+                # back/discard everything already processed earlier in this run.
+                db.commit()
+
             except Exception as e:
                 logger.debug(f"Error processing email {num}: {e}")
                 summary["errors"] += 1
+                db.rollback()
 
-        db.commit()
         mail.logout()
 
     except Exception as e:
@@ -426,4 +458,160 @@ def run_email_sync() -> dict:
         db.close()
 
     logger.info(f"Email sync done: {summary}")
+    return summary
+
+
+def reprocess_stale_events() -> dict:
+    """
+    Re-classify already-saved category='other' email_events with the current
+    classifier and re-run the linking/status/interview/timeline side effects.
+    Needed because classifier improvements only apply to new mail by default —
+    a message_id already in email_events is never re-fetched by run_email_sync.
+    """
+    from sqlalchemy import text
+    from src.api.database import SessionLocal
+    from src.api.models import Application, Job, StatusHistory
+    from src.email.classifier import classify, extract_company
+
+    EMAIL    = os.getenv("EMAIL_ADDRESS", "")
+    PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "").replace(" ", "")
+    HOST     = os.getenv("EMAIL_IMAP_HOST", "imap.gmail.com")
+    PORT     = int(os.getenv("EMAIL_IMAP_PORT", "993"))
+
+    if not EMAIL or not PASSWORD:
+        return {"error": "EMAIL_ADDRESS or EMAIL_APP_PASSWORD not configured"}
+
+    db = SessionLocal()
+    summary = {"checked": 0, "reclassified": 0, "status_updates": 0, "errors": 0}
+    mail = None
+
+    try:
+        rows = db.execute(text("""
+            SELECT id, message_id, subject, from_address, snippet, company_name
+            FROM email_events WHERE category = 'other'
+        """)).fetchall()
+
+        known_companies = [
+            c[0] for c in db.execute(text(
+                "SELECT company_name FROM tracked_companies WHERE is_active = 1"
+            )).fetchall()
+        ]
+
+        for row in rows:
+            ev_id, msg_id, subject, from_addr, snippet, old_company = row
+            summary["checked"] += 1
+
+            # Cheap pre-filter on stored subject/snippet — only hit IMAP for
+            # rows whose category actually changes under the new classifier.
+            quick_category = classify(subject or "", snippet or "", from_addr or "")
+            if quick_category == "other":
+                continue
+
+            try:
+                if mail is None:
+                    mail = imaplib.IMAP4_SSL(HOST, PORT)
+                    mail.login(EMAIL, PASSWORD)
+                    mail.select("INBOX", readonly=True)
+
+                status, data = mail.search(None, "HEADER", "Message-ID", msg_id)
+                if status != "OK" or not data[0]:
+                    continue
+                num = data[0].split()[0]
+                _, msg_data = mail.fetch(num, "(RFC822)")
+                msg = email.message_from_bytes(msg_data[0][1])
+                body = _get_body(msg)
+                category = classify(subject or "", body, from_addr or "")
+                if category == "other":
+                    continue
+
+                company, company_src = extract_company(subject or "", body, from_addr or "", known_companies)
+                company = company or old_company
+
+                linked_app_id = None
+                if company:
+                    apps = (
+                        db.query(Application)
+                        .join(Job, Application.job_id == Job.id)
+                        .filter(Job.company_name.ilike(f"%{company}%"))
+                        .all()
+                    )
+                    if apps:
+                        non_terminal = [a for a in apps if a.status not in ("rejected", "withdrawn")]
+                        app = max(non_terminal or apps, key=lambda a: a.updated_at or datetime.min)
+                        linked_app_id = app.id
+
+                        new_status = _CATEGORY_TO_STATUS.get(category)
+                        if new_status:
+                            current_priority = _STATUS_PRIORITY.get(app.status, 0)
+                            new_priority     = _STATUS_PRIORITY.get(new_status, 0)
+                            if new_status == "rejected" or new_priority > current_priority:
+                                db.add(StatusHistory(
+                                    application_id=app.id,
+                                    from_status=app.status,
+                                    to_status=new_status,
+                                    notes=f"email (reprocessed): {subject[:180] if subject else ''}",
+                                ))
+                                app.status = new_status
+                                summary["status_updates"] += 1
+
+                        if category == "interview":
+                            from src.api.routes.applications import _write_timeline_event
+                            _write_timeline_event(
+                                db, app, "interview_invited",
+                                notes=(subject or "")[:200], source="email",
+                            )
+                            interview_dt = _extract_interview_date(msg, body, subject or "")
+                            if interview_dt:
+                                round_name = _infer_round(subject or "", body)
+                                existing = db.execute(text("""
+                                    SELECT id FROM interviews
+                                    WHERE application_id = :app_id
+                                    AND DATE(scheduled_at) = DATE(:dt)
+                                """), {"app_id": app.id, "dt": interview_dt}).fetchone()
+                                if not existing:
+                                    db.execute(text("""
+                                        INSERT INTO interviews
+                                        (application_id, round, scheduled_at, notes)
+                                        VALUES (:app_id, :round, :dt, :notes)
+                                    """), {
+                                        "app_id": app.id,
+                                        "round":  round_name,
+                                        "dt":     interview_dt,
+                                        "notes":  f"Auto-detected from email (reprocessed): {(subject or '')[:180]}",
+                                    })
+                                    _write_timeline_event(
+                                        db, app, "interview_scheduled",
+                                        notes=f"{round_name}: {(subject or '')[:180]}", source="email",
+                                    )
+                        elif category == "recruiter" and app.status in ("phone_screen", "interview"):
+                            from src.api.routes.applications import _write_timeline_event
+                            _write_timeline_event(
+                                db, app, "follow_up_received",
+                                notes=(subject or "")[:200], source="email",
+                            )
+
+                db.execute(text("""
+                    UPDATE email_events
+                    SET category = :cat, company_name = :co, linked_application_id = :app_id
+                    WHERE id = :ev_id
+                """), {"cat": category, "co": company, "app_id": linked_app_id, "ev_id": ev_id})
+                db.commit()
+                summary["reclassified"] += 1
+                logger.info(f"Reprocessed event {ev_id} ('{subject}') -> {category}")
+
+            except Exception as e:
+                logger.debug(f"Error reprocessing event {ev_id}: {e}")
+                summary["errors"] += 1
+                db.rollback()
+
+        if mail is not None:
+            mail.logout()
+
+    except Exception as e:
+        logger.error(f"Reprocess failed: {e}", exc_info=True)
+        summary["error"] = str(e)
+    finally:
+        db.close()
+
+    logger.info(f"Reprocess done: {summary}")
     return summary

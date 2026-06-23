@@ -233,6 +233,10 @@
         <svg class="tab-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="10" width="3" height="5" rx="1"/><rect x="6" y="6" width="3" height="9" rx="1"/><rect x="11" y="2" width="3" height="13" rx="1"/></svg>
         API Usage
       </button>
+      <button class="tab" data-tab="health">
+        <svg class="tab-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 8h3l2-5 4 10 2-5h3"/></svg>
+        System Health
+      </button>
     </nav>
     <div class="sidebar-footer">
       <div id="countdown"></div>
@@ -615,6 +619,35 @@
       </thead>
       <tbody id="usage-body">
         <tr><td colspan="7" class="loading" style="padding:40px;text-align:center">Loading…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- System Health Tab -->
+  <section id="tab-health" class="tab-content">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <h2 style="font-size:16px;font-weight:700;color:#dff0d4">System Health</h2>
+        <p style="font-size:12px;color:#628a6a;margin-top:3px">Periodic agent-reviewed check of scraping, email sync, proxies, and ATS boards</p>
+      </div>
+      <button class="btn-secondary btn-sm" onclick="loadSystemHealth()">Refresh</button>
+    </div>
+
+    <div id="health-banner" style="padding:16px 18px;border-radius:8px;margin-bottom:18px;display:none"></div>
+
+    <div id="health-components" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:28px"></div>
+
+    <h3 style="font-size:13px;font-weight:700;color:#9fc99a;margin-bottom:10px">History</h3>
+    <table style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr style="border-bottom:1px solid #1c3020;font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em">
+          <th style="text-align:left;padding:8px 12px">Checked</th>
+          <th style="text-align:left;padding:8px 12px">Status</th>
+          <th style="text-align:left;padding:8px 12px">Summary</th>
+        </tr>
+      </thead>
+      <tbody id="health-history-body">
+        <tr><td colspan="3" class="loading" style="padding:40px;text-align:center">Loading…</td></tr>
       </tbody>
     </table>
   </section>

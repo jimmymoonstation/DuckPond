@@ -51,6 +51,11 @@ _RULES = [
         "available to speak", "find a time", "pick a time", "choose a time",
         "when are you available", "what times work", "what time works",
         "hop on a call", "quick call", "intro call", "discovery call",
+        # Confirmation/reminder phrasing for an already-scheduled interview
+        "confirmation of your interview", "confirmation for your interview",
+        "your interview confirmation", "interview confirmation",
+        "upcoming interview", "your upcoming interview",
+        "interview reminder", "reminder for your interview",
     ]),
     # Recruiter outreach and follow-ups — saved but don't auto-update app status
     ("recruiter", [
@@ -64,6 +69,16 @@ _RULES = [
         "re: your application", "update on your application",
         "heard back", "any updates", "next steps",
     ]),
+]
+
+# Subject-only patterns that signal a scheduled/confirmed interview even
+# without one of the exact phrases above — e.g. "Apple Interview - Tuesday,
+# June 23" or "Reminder: Your Upcoming Interview with Mercor"
+_INTERVIEW_SUBJECT_RES = [
+    re.compile(r'\binterview\b.{0,30}\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', re.IGNORECASE),
+    re.compile(r'\b(reminder|confirmation|confirmed|scheduled)\b.{0,25}\binterview\b', re.IGNORECASE),
+    re.compile(r'\binterview\b.{0,25}\b(reminder|confirmation|confirmed|scheduled)\b', re.IGNORECASE),
+    re.compile(r'\bonsite\b.{0,15}\binterview\b', re.IGNORECASE),
 ]
 
 # Senders that are clearly job-related even if body is sparse
@@ -105,6 +120,10 @@ def classify(subject: str, body: str, from_address: str) -> str:
     for category, phrases in _RULES:
         if any(p in text for p in phrases):
             return category
+
+    if any(r.search(subject) for r in _INTERVIEW_SUBJECT_RES):
+        return "interview"
+
     return "other"
 
 

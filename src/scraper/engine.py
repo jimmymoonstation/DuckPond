@@ -1,6 +1,6 @@
 """
-Scraper engine: orchestrates Brave Search + career page scrapers,
-deduplicates results, and persists new jobs to the database.
+Scraper engine: orchestrates career page scrapers, deduplicates results,
+and persists new jobs to the database.
 """
 import json
 import logging
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.api.database import SessionLocal
 from src.api.models import Job, SearchConfig, TrackedCompany
-from src.scraper import brave, career_pages
+from src.scraper import career_pages
 from src.scraper.career_pages import scrape_linkedin_only
 
 logger = logging.getLogger(__name__)
@@ -64,9 +64,7 @@ async def run_scraper() -> RunStats:
 
     try:
         from src.scraper.web_search import reset_ddg_circuit
-        from src.scraper.brave import reset_brave_circuit
         reset_ddg_circuit()
-        reset_brave_circuit()
 
         config = _load_config()
         titles = json.loads(config.titles_json) if config else []
@@ -79,16 +77,14 @@ async def run_scraper() -> RunStats:
             stats.finish()
             return stats
 
-        # Layer 1: Brave Search (broad web)
-        brave_jobs = await brave.search_jobs(titles, locations, keywords)
-        stats.sources_checked += 1
-
-        # Layer 2: Career pages (targeted)
+        # Career pages (direct ATS APIs — Greenhouse/Lever/Ashby/Workday/SmartRecruiters/Amazon/etc,
+        # plus DDG-based discovery for custom-ATS companies). Brave broad-web search was disabled:
+        # across the whole job history it ever surfaced exactly 1 job while burning 2x its monthly quota.
         career_jobs = await career_pages.scrape_all(titles, locations, levels)
         stats.sources_checked += len(career_pages.GREENHOUSE_COMPANIES) + len(career_pages.LEVER_COMPANIES)
 
-        all_jobs = brave_jobs + career_jobs
-        logger.info(f"Raw results: {len(brave_jobs)} brave + {len(career_jobs)} career pages")
+        all_jobs = career_jobs
+        logger.info(f"Raw results: {len(career_jobs)} career pages")
 
         # Persist
         new_jobs_list, new_count, dup_count = _save_jobs_with_list(all_jobs)

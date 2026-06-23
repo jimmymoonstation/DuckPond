@@ -140,3 +140,15 @@ class DiscordSession(Base):
     channel_id = Column(String, nullable=False, unique=True)
     message_history_json = Column(Text, nullable=False, default="[]")
     last_active = Column(DateTime, default=func.now(), nullable=False)
+
+
+class SystemHealthReport(Base):
+    """Periodic agent-authored system health check — see src/api/routes/system_health.py."""
+    __tablename__ = "system_health_reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    overall_status = Column(String, nullable=False)   # ok | warn | critical
+    summary = Column(Text, nullable=False)             # agent's human-readable assessment
+    components_json = Column(Text, nullable=False)     # [{name, status, message}, ...]
+    diagnostics_json = Column(Text)                    # raw diagnostics snapshot the agent reviewed

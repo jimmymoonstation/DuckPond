@@ -14,6 +14,7 @@ VALID_EVENTS = {
     "applied", "phone_screen",
     "assessment_sent", "assessment_submitted",
     "interview_invited", "interview_scheduled", "interview_completed",
+    "follow_up_received",
     "offer_received", "rejected", "withdrawn",
 }
 

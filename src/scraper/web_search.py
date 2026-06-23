@@ -15,6 +15,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# DDG calls run sync in a thread pool, but the underlying connect can still saturate
+# this droplet's sockets if too many companies fire concurrently — cap it independent
+# of the outer scraper semaphore, which only limits async task count, not DDG load.
+_ddg_semaphore = asyncio.Semaphore(3)
+
+
+async def _ddg_text_throttled(query: str, max_results: int = 15) -> list[dict]:
+    async with _ddg_semaphore:
+        return await asyncio.get_event_loop().run_in_executor(None, _ddg_text, query, max_results)
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 # Domains that are job aggregators / boards, never actual employer career pages
@@ -229,11 +239,11 @@ async def scrape_via_web_search(
     for title_kw in titles[:3]:
         # Strategy 1: site-scoped search
         q1 = f'"{title_kw}" {loc_kw} site:{domain}'
-        raw_results += await asyncio.get_event_loop().run_in_executor(None, _ddg_text, q1, 10)
+        raw_results += await _ddg_text_throttled(q1, 10)
 
         # Strategy 2: broader search mentioning the company + careers page
         q2 = f'{company_name} "{title_kw}" {loc_kw} careers -site:linkedin.com -site:glassdoor.com -site:indeed.com'
-        r2 = await asyncio.get_event_loop().run_in_executor(None, _ddg_text, q2, 8)
+        r2 = await _ddg_text_throttled(q2, 8)
         # Keep only results that point to the company's own domain
         raw_results += [r for r in r2 if domain in r.get("href", "")]
 
@@ -367,9 +377,7 @@ async def discover_new_companies(
     for title_kw in titles:  # all titles, not just first 3
         for domain, ats_type, _ in _ATS_SEARCH_DOMAINS:
             query = f'"{title_kw}" {loc_kw} site:{domain}'
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, _ddg_text, query, 30
-            )
+            results = await _ddg_text_throttled(query, 30)
             for r in results:
                 _process_url(r.get("href", ""))
 

@@ -195,8 +195,19 @@ def update_interview(interview_id: int, body: InterviewUpdate, db: Session = Dep
     if not interview:
         raise HTTPException(404, "Interview not found")
 
+    had_outcome = interview.outcome is not None
     for field, val in body.model_dump(exclude_none=True).items():
         setattr(interview, field, val)
+
+    # Record a checkpoint the first time this round gets an outcome
+    if body.outcome is not None and not had_outcome:
+        app = db.query(Application).filter(Application.id == interview.application_id).first()
+        if app:
+            _write_timeline_event(
+                db, app, "interview_completed",
+                notes=f"{interview.round}: {body.outcome}", source="manual",
+            )
+
     db.commit()
     db.refresh(interview)
     return interview

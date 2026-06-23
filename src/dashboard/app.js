@@ -74,6 +74,7 @@ function switchTab(tabName, pushState = true) {
   if (tabName === 'analysis')   loadAnalysis();
   if (tabName === 'interviews') loadInterviewPrep();
   if (tabName === 'usage')      loadUsage();
+  if (tabName === 'health')     loadSystemHealth();
 }
 
 function setupTabs() {
@@ -1581,6 +1582,60 @@ function _toggleInterviewCard(id) {
   body.classList.toggle('hidden', isOpen);
   card.classList.toggle('icard-collapsed', isOpen);
   if (chevron) chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+  if (!isOpen) loadCheckpoints(id);
+}
+
+const _CHECKPOINT_META = {
+  applied:              { icon: '📨', label: 'Applied' },
+  phone_screen:         { icon: '☎️', label: 'Phone screen' },
+  assessment_sent:      { icon: '📝', label: 'Assessment sent' },
+  assessment_submitted: { icon: '✅', label: 'Assessment submitted' },
+  interview_invited:    { icon: '✉️', label: 'Interview invite received' },
+  interview_scheduled:  { icon: '📅', label: 'Interview scheduled' },
+  interview_completed:  { icon: '🎤', label: 'Interview completed' },
+  follow_up_received:   { icon: '🔁', label: 'Follow-up received' },
+  offer_received:       { icon: '🎉', label: 'Offer received' },
+  rejected:             { icon: '✖️', label: 'Rejected' },
+  withdrawn:            { icon: '↩️', label: 'Withdrawn' },
+};
+
+let _checkpointCache = {};
+
+async function loadCheckpoints(appId) {
+  const el = document.getElementById(`icheckpoints-${appId}`);
+  if (!el) return;
+  if (!_checkpointCache[appId]) {
+    el.innerHTML = `<div style="font-size:12px;color:#628a6a">Loading checkpoints…</div>`;
+    try {
+      _checkpointCache[appId] = await apiFetch(`/timeline/application/${appId}`);
+    } catch (e) {
+      _checkpointCache[appId] = [];
+    }
+  }
+  el.innerHTML = _renderCheckpoints(_checkpointCache[appId]);
+}
+
+function _renderCheckpoints(events) {
+  if (!events || !events.length) {
+    return `<div style="margin-bottom:16px"><div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-weight:600">Checkpoints</div><div style="font-size:12px;color:#628a6a">No checkpoints recorded yet.</div></div>`;
+  }
+  const rows = events.map(ev => {
+    const meta = _CHECKPOINT_META[ev.event_type] || { icon: '•', label: ev.event_type };
+    const days = ev.days_since_applied != null ? `<span style="color:#628a6a">· day ${ev.days_since_applied}</span>` : '';
+    return `
+      <div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #1c3020;font-size:12px">
+        <span style="flex-shrink:0">${meta.icon}</span>
+        <span style="color:#dff0d4;font-weight:600;white-space:nowrap">${esc(meta.label)}</span>
+        <span style="color:#628a6a;white-space:nowrap">${formatDate(ev.event_date)} ${days}</span>
+        <span style="color:#628a6a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ev.notes || '')}</span>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;color:#628a6a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-weight:600">Checkpoints</div>
+      <div>${rows}</div>
+    </div>`;
 }
 
 function _renderInterviewRounds(a) {
@@ -1683,6 +1738,7 @@ function _renderInterviewCard(a) {
         </button>
       </div>
       <div class="icard-body hidden" id="ibody-${a.id}">
+        <div id="icheckpoints-${a.id}"></div>
         ${_renderInterviewRounds(a)}
         ${descHtml}
         <div class="icard-prep${prepHtml ? '' : ' hidden'}" id="iprep-${a.id}">${prepHtml}</div>
@@ -1992,6 +2048,67 @@ async function loadUsage() {
       <td style="padding:9px 12px;text-align:right;font-size:13px;color:${claudeCalls > 0 ? '#c084fc' : '#628a6a'}">${claudeCalls > 0 ? claudeCalls.toLocaleString() : '—'}</td>
       <td style="padding:9px 12px;text-align:right;font-size:13px;color:${claudeTokens > 0 ? '#c084fc' : '#628a6a'}">${claudeTokens > 0 ? claudeTokens.toLocaleString() : '—'}</td>
       <td style="padding:9px 12px;text-align:right;font-size:13px;color:#628a6a">${claudeCost > 0 ? '$' + claudeCost.toFixed(4) : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+const _healthColors = {
+  ok:       { bg: 'rgba(61,220,107,0.09)', border: '#1f4d2c', text: '#3ddc6b' },
+  warn:     { bg: 'rgba(245,200,66,0.09)', border: '#5a4a1f', text: '#f5c842' },
+  critical: { bg: 'rgba(232,90,90,0.09)',  border: '#5a1f1f', text: '#e85a5a' },
+};
+
+async function loadSystemHealth() {
+  const banner = document.getElementById('health-banner');
+  const grid = document.getElementById('health-components');
+  const histBody = document.getElementById('health-history-body');
+  if (!banner) return;
+
+  const data = await apiFetch('/system-health/reports?limit=20');
+  if (!data || !data.reports.length) {
+    banner.style.display = 'block';
+    banner.style.background = '#0e1f12';
+    banner.style.border = '1px solid #1c3020';
+    banner.innerHTML = `<div style="color:#628a6a;font-size:13px">No health checks recorded yet — the periodic agent runs every 1-2 hours. Check back soon.</div>`;
+    grid.innerHTML = '';
+    histBody.innerHTML = '<tr><td colspan="3" class="loading" style="padding:20px;text-align:center">No reports yet</td></tr>';
+    return;
+  }
+
+  const latest = data.reports[0];
+  const c = _healthColors[latest.overall_status] || _healthColors.warn;
+
+  banner.style.display = 'block';
+  banner.style.background = c.bg;
+  banner.style.border = `1px solid ${c.border}`;
+  banner.innerHTML = `
+    <div style="display:flex;align-items:baseline;justify-content:space-between">
+      <div>
+        <span style="font-size:14px;font-weight:700;color:${c.text};text-transform:uppercase;letter-spacing:.03em">${latest.overall_status}</span>
+        <span style="font-size:13px;color:#dff0d4;margin-left:10px">${latest.summary}</span>
+      </div>
+      <span style="font-size:11px;color:#628a6a;white-space:nowrap;margin-left:16px" title="${fmtExact(latest.created_at)}">${timeAgo(latest.created_at)}</span>
+    </div>`;
+
+  grid.innerHTML = (latest.components || []).map(comp => {
+    const cc = _healthColors[comp.status] || _healthColors.warn;
+    return `
+      <div style="background:#0e1f12;border:1px solid ${cc.border};border-radius:10px;padding:14px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <span style="font-size:12px;font-weight:600;color:#dff0d4">${comp.name.replace(/_/g, ' ')}</span>
+          <span style="font-size:10px;font-weight:700;color:${cc.text};text-transform:uppercase">${comp.status}</span>
+        </div>
+        <div style="font-size:12px;color:#9fc99a;line-height:1.4">${comp.message}</div>
+      </div>`;
+  }).join('');
+
+  histBody.innerHTML = data.reports.map(r => {
+    const rc = _healthColors[r.overall_status] || _healthColors.warn;
+    return `
+    <tr style="border-bottom:1px solid #1c3020">
+      <td style="padding:9px 12px;font-size:12px;color:#628a6a" title="${fmtExact(r.created_at)}">${timeAgo(r.created_at)}</td>
+      <td style="padding:9px 12px;font-size:11px;font-weight:700;color:${rc.text};text-transform:uppercase">${r.overall_status}</td>
+      <td style="padding:9px 12px;font-size:13px;color:#dff0d4">${r.summary}</td>
     </tr>`;
   }).join('');
 }

@@ -7,7 +7,7 @@ LinkedIn uses a semi-public guest search endpoint.
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -378,6 +378,8 @@ async def scrape_all(titles: list[str], locations: list[str], levels: list[str] 
                 tasks.append(_guarded(_scrape_apple(client, titles, locations, levels), "Apple"))
             elif ats == "workable":
                 tasks.append(_guarded(_scrape_workable(client, slug, name, titles, locations, levels), f"Workable/{slug}"))
+            elif ats == "rippling":
+                tasks.append(_guarded(_scrape_rippling(client, slug, name, titles, locations, levels), f"Rippling/{slug}"))
             elif ats == "custom" and c.get("career_url"):
                 from src.scraper.web_search import scrape_via_web_search
                 tasks.append(_guarded(
@@ -532,6 +534,45 @@ async def _scrape_ashby(client, company, titles, locations, levels):
     return results
 
 
+async def _scrape_rippling(client, slug, display_name, titles, locations, levels):
+    url = f"https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
+    try:
+        resp = await client.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception:
+        return []
+    if resp.status_code in (401, 403, 404, 422):
+        return []
+    try:
+        data = resp.json()
+    except Exception:
+        return []
+
+    results = []
+    seen = set()
+    for job in data if isinstance(data, list) else []:
+        job_id = job.get("uuid")
+        title = job.get("name", "")
+        loc = (job.get("workLocation") or {}).get("label", "") or ""
+        if not _matches_criteria(title, loc, titles, locations, levels):
+            continue
+        key = (job_id, loc)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({
+            "company_job_id": job_id,
+            "company_name":   display_name,
+            "job_title":      title,
+            "location":       loc or None,
+            "level":          _infer_level(title),
+            "url":            job.get("url", f"https://ats.rippling.com/{slug}/jobs/{job_id}"),
+            "source":         f"rippling:{slug}",
+            "description":    None,
+            "posted_at":      None,
+        })
+    return results
+
+
 async def _scrape_workday(client, tenant, wd_ver, display_name, board, titles, locations, levels):
     url = f"https://{tenant}.{wd_ver}.myworkdayjobs.com/wday/cxs/{tenant}/{board}/jobs"
     headers = {
@@ -570,7 +611,7 @@ async def _scrape_workday(client, tenant, wd_ver, display_name, board, titles, l
                 job_url = f"https://{tenant}.{wd_ver}.myworkdayjobs.com/{board}{path}"
             else:
                 job_url = path
-            posted_at = _parse_iso(job.get("postedOn"))
+            posted_at = _parse_workday_posted(job.get("postedOn"))
 
             results.append({
                 "company_job_id": path.split("/")[-1] if path else job_id,
@@ -1421,3 +1462,23 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _parse_workday_posted(s: Optional[str]) -> Optional[datetime]:
+    """
+    Workday's cxs API returns relative strings, not ISO dates:
+    "Posted Today", "Posted Yesterday", "Posted N Days Ago", "Posted 30+ Days Ago".
+    "30+" is Workday's own display cap — treated as exactly 30 days old.
+    """
+    if not s:
+        return None
+    s = s.strip().lower()
+    now = datetime.now(timezone.utc)
+    if "today" in s:
+        return now
+    if "yesterday" in s:
+        return now - timedelta(days=1)
+    m = re.search(r"(\d+)\+?\s*day", s)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+    return None
