@@ -201,6 +201,43 @@ def _infer_round(subject: str, body: str) -> str:
     return "Interview"
 
 
+def _resolve_interview_outcomes(db, app, category: str, exclude_interview_id: int | None = None) -> int:
+    """
+    Infer past interview round outcomes from a status-changing email, since
+    nothing else ever sets Interview.outcome:
+      - "interview" (a new/next round invite) implies any earlier, still-open
+        round (scheduled in the past, no outcome yet) was passed.
+      - "rejection" implies the most recent still-open round was failed.
+      - "offer" implies every still-open round was passed.
+    Returns the number of interview rows updated.
+    """
+    from src.api.models import Interview
+
+    now = datetime.utcnow()
+    q = db.query(Interview).filter(
+        Interview.application_id == app.id,
+        Interview.outcome.is_(None),
+        Interview.scheduled_at.isnot(None),
+        Interview.scheduled_at < now,
+    )
+    if exclude_interview_id:
+        q = q.filter(Interview.id != exclude_interview_id)
+    open_rounds = q.order_by(Interview.scheduled_at.desc()).all()
+    if not open_rounds:
+        return 0
+
+    if category == "rejection":
+        open_rounds[0].outcome = "fail"
+        return 1
+
+    if category in ("offer", "interview"):
+        for iv in open_rounds:
+            iv.outcome = "pass"
+        return len(open_rounds)
+
+    return 0
+
+
 def run_email_sync() -> dict:
     """
     Connect to Gmail, read emails from the last 30 days, classify them,
@@ -366,6 +403,16 @@ def run_email_sync() -> dict:
                                     f"Updated {company} application → {new_status} "
                                     f"(via email: {subject[:60]})"
                                 )
+
+                        # Infer outcomes for prior rounds before any new round is created below —
+                        # a next-round invite/rejection/offer is direct evidence of what happened
+                        # to whatever round was already scheduled and still unresolved.
+                        resolved = _resolve_interview_outcomes(db, app, category)
+                        if resolved:
+                            logger.info(
+                                f"Marked {resolved} interview round(s) for {company} "
+                                f"app {app.id} via email ({category})"
+                            )
 
                         # Write timeline event + create Interview row for interview emails
                         if category == "interview":
@@ -553,6 +600,13 @@ def reprocess_stale_events() -> dict:
                                 ))
                                 app.status = new_status
                                 summary["status_updates"] += 1
+
+                        resolved = _resolve_interview_outcomes(db, app, category)
+                        if resolved:
+                            logger.info(
+                                f"Reprocess: marked {resolved} interview round(s) for "
+                                f"app {app.id} via email ({category})"
+                            )
 
                         if category == "interview":
                             from src.api.routes.applications import _write_timeline_event

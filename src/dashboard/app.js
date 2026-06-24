@@ -1650,12 +1650,17 @@ function _renderInterviewRounds(a) {
     const isPast = d && d < new Date();
     const outcomeColor = iv.outcome === 'pass' ? '#69db7c' : iv.outcome === 'fail' ? '#e85a5a' : '#628a6a';
     const outcomeLabel = iv.outcome ? iv.outcome.charAt(0).toUpperCase() + iv.outcome.slice(1) : 'Pending';
+    const actions = iv.outcome
+      ? `<button onclick="setInterviewOutcome(${iv.id}, null)" style="background:none;border:none;color:#628a6a;font-size:11px;cursor:pointer;text-decoration:underline">Clear</button>`
+      : `<button onclick="setInterviewOutcome(${iv.id}, 'pass')" style="background:none;border:1px solid #1f4d2c;color:#69db7c;font-size:11px;cursor:pointer;border-radius:4px;padding:2px 8px;margin-right:4px">Pass</button>
+         <button onclick="setInterviewOutcome(${iv.id}, 'fail')" style="background:none;border:1px solid #5a1f1f;color:#e85a5a;font-size:11px;cursor:pointer;border-radius:4px;padding:2px 8px">Fail</button>`;
     return `
       <tr style="border-bottom:1px solid #1c3020">
         <td style="padding:7px 10px;font-size:13px;color:#dff0d4;white-space:nowrap">${esc(iv.round)}</td>
         <td style="padding:7px 10px;font-size:13px;color:${isPast ? '#628a6a' : '#adc9a0'};white-space:nowrap">${dateStr}</td>
         <td style="padding:7px 10px;font-size:11px;color:${outcomeColor}">${outcomeLabel}</td>
         <td style="padding:7px 10px;font-size:11px;color:#628a6a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(iv.notes || '')}</td>
+        <td style="padding:7px 10px;white-space:nowrap">${actions}</td>
       </tr>`;
   }).join('');
 
@@ -1670,11 +1675,20 @@ function _renderInterviewRounds(a) {
               <th style="text-align:left;padding:5px 10px;font-weight:500">Date & Time</th>
               <th style="text-align:left;padding:5px 10px;font-weight:500">Outcome</th>
               <th style="text-align:left;padding:5px 10px;font-weight:500">Notes</th>
+              <th style="text-align:left;padding:5px 10px;font-weight:500"></th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>` : `<div style="font-size:12px;color:#628a6a">No interviews scheduled yet — they appear here automatically from your email and Google Calendar.</div>`}
     </div>`;
+}
+
+async function setInterviewOutcome(interviewId, outcome) {
+  await apiFetch(`/applications/interviews/${interviewId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ outcome }),
+  });
+  await loadInterviewPrep();
 }
 
 function _renderInterviewCard(a) {

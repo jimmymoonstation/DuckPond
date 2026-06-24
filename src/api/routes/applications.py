@@ -196,7 +196,7 @@ def update_interview(interview_id: int, body: InterviewUpdate, db: Session = Dep
         raise HTTPException(404, "Interview not found")
 
     had_outcome = interview.outcome is not None
-    for field, val in body.model_dump(exclude_none=True).items():
+    for field, val in body.model_dump(exclude_unset=True).items():
         setattr(interview, field, val)
 
     # Record a checkpoint the first time this round gets an outcome
