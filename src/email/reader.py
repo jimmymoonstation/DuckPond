@@ -270,6 +270,7 @@ def run_email_sync() -> dict:
         # ── Known company names + domains for extraction ─────────────────────
         all_tracked = db.query(TrackedCompany).filter_by(is_active=True).all()
         known_companies = [c.company_name for c in all_tracked]
+        known_slugs = {c.ats_slug.lower(): c.company_name for c in all_tracked if c.ats_slug}
 
         # Build set of employer domains: "stripe.com", "databricks.com", etc.
         # Used to decide whether to save "other" category emails
@@ -349,7 +350,7 @@ def run_email_sync() -> dict:
                     job_title    = None
                     snippet      = re.sub(r'\s+', ' ', preview).strip()[:250]
                 else:
-                    company, company_src = extract_company(subject, body, from_addr, known_companies)
+                    company, company_src = extract_company(subject, body, from_addr, known_companies, known_slugs)
                     job_title = extract_job_title(subject, body)
                     snippet   = re.sub(r'\s+', ' ', body).strip()[:250]
 
@@ -511,9 +512,13 @@ def run_email_sync() -> dict:
 def reprocess_stale_events() -> dict:
     """
     Re-classify already-saved category='other' email_events with the current
-    classifier and re-run the linking/status/interview/timeline side effects.
-    Needed because classifier improvements only apply to new mail by default —
-    a message_id already in email_events is never re-fetched by run_email_sync.
+    classifier, and re-run company extraction for already-classified events
+    that never got linked to an application (e.g. a sender domain that only
+    resolves via a company's ats_slug, not its display name — fixed after
+    these rows were first saved). Re-runs the linking/status/interview/
+    timeline side effects either way. Needed because classifier/extraction
+    improvements only apply to new mail by default — a message_id already in
+    email_events is never re-fetched by run_email_sync.
     """
     from sqlalchemy import text
     from src.api.database import SessionLocal
@@ -535,7 +540,9 @@ def reprocess_stale_events() -> dict:
     try:
         rows = db.execute(text("""
             SELECT id, message_id, subject, from_address, snippet, company_name
-            FROM email_events WHERE category = 'other'
+            FROM email_events
+            WHERE category = 'other'
+            OR (category IN ('interview', 'rejection', 'offer') AND linked_application_id IS NULL)
         """)).fetchall()
 
         known_companies = [
@@ -543,6 +550,11 @@ def reprocess_stale_events() -> dict:
                 "SELECT company_name FROM tracked_companies WHERE is_active = 1"
             )).fetchall()
         ]
+        known_slugs = {
+            c[0].lower(): c[1] for c in db.execute(text(
+                "SELECT ats_slug, company_name FROM tracked_companies WHERE is_active = 1 AND ats_slug IS NOT NULL"
+            )).fetchall()
+        }
 
         for row in rows:
             ev_id, msg_id, subject, from_addr, snippet, old_company = row
@@ -571,7 +583,7 @@ def reprocess_stale_events() -> dict:
                 if category == "other":
                     continue
 
-                company, company_src = extract_company(subject or "", body, from_addr or "", known_companies)
+                company, company_src = extract_company(subject or "", body, from_addr or "", known_companies, known_slugs)
                 company = company or old_company
 
                 linked_app_id = None

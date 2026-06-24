@@ -13,7 +13,7 @@ def start_scheduler():
     from src.scraper.engine import run_scraper, run_linkedin_scraper
     from src.discord.notifications import send_morning_summary, send_evening_checkin, send_daily_report
     from src.api.learning import run_learning_pass
-    from src.email.reader import run_email_sync
+    from src.email.reader import run_email_sync, reprocess_stale_events
     from src.scraper.web_search import run_company_discovery
     from src.scraper.validator import run_validation
     from src.api.routes.calendar import sync_calendar_interviews
@@ -50,6 +50,17 @@ def start_scheduler():
         run_email_sync,
         trigger=IntervalTrigger(minutes=15),
         id="email_sync",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Re-link previously-unmatched interview/rejection/offer emails (e.g. a
+    # sender domain that didn't resolve to a tracked company at the time) —
+    # every 6 hours, self-heals as extraction/classification logic improves.
+    scheduler.add_job(
+        reprocess_stale_events,
+        trigger=IntervalTrigger(hours=6),
+        id="email_reprocess",
         replace_existing=True,
         max_instances=1,
     )

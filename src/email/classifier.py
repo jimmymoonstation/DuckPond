@@ -175,23 +175,43 @@ _GENERIC_DOMAINS = {
 
 
 def extract_company(subject: str, body: str, from_address: str,
-                    known_companies: list[str]) -> tuple[str | None, str]:
+                    known_companies: list[str],
+                    known_slugs: dict[str, str] | None = None) -> tuple[str | None, str]:
     """
     Try to extract company name from email content.
     Returns (company_name, source) where source is one of:
       'sender_domain' | 'subject_known' | 'subject_pattern' | 'body_known'
     Body-sourced matches are lower-confidence and should not auto-update app status.
+
+    known_slugs maps a tracked company's ats_slug (lowercase) -> display name.
+    Some companies' real email domain is a ticker/abbreviation that shares no
+    substring with their formal name (e.g. Applied Materials emails from
+    amat.com — "amat" isn't a substring of "appliedmaterials"), but their
+    ats_slug already captures that mapping since it's pulled from their
+    actual career-site tenant.
     """
+    known_slugs = known_slugs or {}
+
     # ── 1. Sender domain heuristic (highest confidence) ─────────────────────
     # recruiting@stripe.com → "Stripe"
     domain_match = re.search(r'@([\w-]+)\.(com|io|co|ai|tech|org|net)', from_address.lower())
     if domain_match:
         raw = domain_match.group(1)
-        if raw not in _GENERIC_DOMAINS:
+        # Substring check, not exact: shared-ATS notification domains often
+        # append a suffix to the platform name (ashbyhq.com, not ashby.com),
+        # so an exact-match lookup against _GENERIC_DOMAINS silently misses
+        # them and falls through to misreporting the ATS itself as "the company".
+        is_generic = any(g in raw for g in _GENERIC_DOMAINS)
+        # Short raw domains (1-2 chars, e.g. "x" for x.ai) match almost any
+        # company name as a substring purely by chance — require a minimum
+        # length before trusting the loose substring match below.
+        if not is_generic and len(raw) >= 3:
             # Check if domain matches a known tracked company
             for company in sorted(known_companies, key=len, reverse=True):
                 if raw in company.lower().replace(" ", "").replace("-", ""):
                     return company, "sender_domain"
+            if raw in known_slugs:
+                return known_slugs[raw], "sender_domain"
             return raw.replace("-", " ").title(), "sender_domain"
 
     # ── 2. Subject-only known-company match (high confidence) ────────────────

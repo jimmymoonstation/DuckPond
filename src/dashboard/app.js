@@ -1570,7 +1570,16 @@ function _renderInterviewCards() {
       </div>`;
     return;
   }
-  container.innerHTML = _interviewApps.map(_renderInterviewCard).join('');
+  // Soonest upcoming interview first; apps with no future interview sink to the bottom.
+  const now = new Date();
+  const nextUpcoming = (a) => {
+    const future = (a.interviews || [])
+      .map(iv => iv.scheduled_at ? new Date(iv.scheduled_at + 'Z') : null)
+      .filter(d => d && d >= now);
+    return future.length ? Math.min(...future.map(d => d.getTime())) : Infinity;
+  };
+  const sorted = [..._interviewApps].sort((x, y) => nextUpcoming(x) - nextUpcoming(y));
+  container.innerHTML = sorted.map(_renderInterviewCard).join('');
 }
 
 function _toggleInterviewCard(id) {
@@ -1639,7 +1648,12 @@ function _renderCheckpoints(events) {
 }
 
 function _renderInterviewRounds(a) {
-  const rounds = a.interviews || [];
+  const rounds = [...(a.interviews || [])].sort((x, y) => {
+    if (!x.scheduled_at && !y.scheduled_at) return 0;
+    if (!x.scheduled_at) return 1;
+    if (!y.scheduled_at) return -1;
+    return new Date(x.scheduled_at) - new Date(y.scheduled_at);
+  });
   const rows = rounds.map(iv => {
     const d = iv.scheduled_at ? new Date(iv.scheduled_at + 'Z') : null;
     const PT = {timeZone: 'America/Los_Angeles'};
